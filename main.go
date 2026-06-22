@@ -246,7 +246,7 @@ func firstNonEmpty(vals ...string) string {
 func configCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "config",
-		Short: "Show silly-review's saved configuration",
+		Short: "Show or change silly-review's saved configuration",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load()
@@ -258,5 +258,45 @@ func configCmd() *cobra.Command {
 			return nil
 		},
 	}
+	c.AddCommand(configBaseCmd())
 	return c
+}
+
+// configBaseCmd shows or sets the base branch the current repo is diffed
+// against — the non-TUI equivalent of pressing `c` on the branch screen.
+func configBaseCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "base [ref]",
+		Short: "Show or set the base branch this repo is reviewed against (e.g. origin/main)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			top, err := gitx.Toplevel(ctx, cwd)
+			if err != nil {
+				return fmt.Errorf("not inside a git repository")
+			}
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			if len(args) == 0 {
+				if b, ok := cfg.RepoBase(top); ok {
+					fmt.Println(b)
+				} else {
+					fmt.Println("(no base set — defaults to origin's default branch)")
+				}
+				return nil
+			}
+			cfg.SetRepoBase(top, args[0])
+			if err := cfg.Save(); err != nil {
+				return err
+			}
+			fmt.Printf("base for %s set to %s\n", top, args[0])
+			return nil
+		},
+	}
 }
