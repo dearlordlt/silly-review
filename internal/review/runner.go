@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -142,6 +143,9 @@ func RunWithResume(ctx context.Context, opts Options, onEvent func(Event)) (*Res
 func resumable(res *Result, err error) bool {
 	if res == nil || res.SessionID == "" {
 		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false // user cancelled / timed out — don't resume
 	}
 	if !res.IsError && err == nil {
 		return false // succeeded
