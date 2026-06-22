@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -64,6 +65,27 @@ func TestViewsDoNotPanic(t *testing.T) {
 	m.screen = scError
 	if strings.TrimSpace(m.View()) == "" {
 		t.Error("error screen rendered empty")
+	}
+}
+
+// TestProgressShowsActivityAndTimer proves the progress screen shows the current
+// action and an elapsed timer rather than a static "working…".
+func TestProgressShowsActivityAndTimer(t *testing.T) {
+	m := testModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.screen = scProgress
+	m.curActivity = "reading config.go"
+	m.reviewStart = time.Now().Add(-65 * time.Second)
+
+	out := m.View()
+	if !strings.Contains(out, "reading config.go") {
+		t.Errorf("progress should show the current activity; got:\n%s", out)
+	}
+	if !strings.Contains(out, "1:05") {
+		t.Errorf("progress should show an elapsed timer (~1:05); got:\n%s", out)
+	}
+	if strings.Contains(out, " working…") {
+		t.Errorf("progress should no longer show static 'working…'; got:\n%s", out)
 	}
 }
 

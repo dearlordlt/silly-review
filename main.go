@@ -111,6 +111,7 @@ func runReview(cmd *cobra.Command, _ []string) error {
 		FolderKey: cwd,
 		Fetch:     !flagNoFetch,
 		BinPath:   bin,
+		Version:   buildVersion(),
 	})
 }
 

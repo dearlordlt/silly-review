@@ -77,7 +77,11 @@ func (m *Model) View() string {
 }
 
 func header(title, sub string) string {
-	s := titleStyle.Render("⬡ silly-review") + dimStyle.Render("  ·  "+title)
+	s := titleStyle.Render("⬡ silly-review")
+	if appVersion != "" {
+		s += dimStyle.Render(" " + appVersion)
+	}
+	s += dimStyle.Render("  ·  " + title)
 	if sub != "" {
 		s += "\n" + dimStyle.Render(sub)
 	}

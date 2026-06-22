@@ -59,7 +59,12 @@ type Params struct {
 	FolderKey string
 	Fetch     bool
 	BinPath   string
+	Version   string
 }
+
+// appVersion is shown in the TUI header so the running build is always visible
+// (set by New). One program runs at a time, so a package var is fine.
+var appVersion string
 
 // Model is the root Bubble Tea model.
 type Model struct {
@@ -130,6 +135,7 @@ type reviewErrMsg struct{ err error }
 
 // New builds the root model.
 func New(p Params) *Model {
+	appVersion = p.Version
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("63"))
