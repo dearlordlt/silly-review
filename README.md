@@ -15,18 +15,30 @@ It never touches your working tree. You can be mid-work on your own branch and r
 
 ## Install
 
+**macOS / Linux:**
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/dearlordlt/silly-review/main/setup.sh | sh
 ```
 
-This clones, builds, and installs `silly-review` to `~/.local/bin` (override with `INSTALL_DIR=…`, pick a ref with `BRANCH=…`). Re-run the same command any time to **update** — or just run `silly-review update`. Or build from source:
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/dearlordlt/silly-review/main/setup.ps1 | iex
+```
+
+The installer clones, builds, and installs `silly-review` (to `~/.local/bin`, or `%LOCALAPPDATA%\silly-review\bin` on Windows — override with `INSTALL_DIR`). Re-run it any time to **update**, or run `silly-review update`.
+
+It needs **git**. If a new-enough **Go** (1.24+) isn't found it downloads the official toolchain to a private dir (`~/.local/share/silly-review/go`) — no `sudo`/admin, exact version, removed by deleting that dir. You also need the **`claude`** CLI signed in ([Claude Code](https://claude.com/claude-code)).
+
+Build from source instead:
 
 ```sh
 git clone https://github.com/dearlordlt/silly-review && cd silly-review
 go build -o bin/silly-review . && install bin/silly-review ~/.local/bin/
 ```
 
-Requires Go 1.24+, git, and an authenticated `claude` CLI (install [Claude Code](https://claude.com/claude-code) and run `claude` once to sign in). Optional: `alias sr=silly-review`.
+Optional: `alias sr=silly-review`.
 
 ## Use
 
