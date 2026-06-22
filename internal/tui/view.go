@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -200,10 +201,17 @@ func (m *Model) viewModel() string {
 }
 
 func (m *Model) viewProgress() string {
-	_, h := m.dims()
+	w, h := m.dims()
 	var b strings.Builder
 	b.WriteString(header("reviewing", "this can take a minute — Claude is reading the code"))
-	b.WriteString(m.spin.View() + " working…\n\n")
+	// Live status line: spinner + the current action + elapsed time, so it never
+	// looks frozen even during Claude's long, tool-less generation phase.
+	activity := m.curActivity
+	if activity == "" {
+		activity = "working…"
+	}
+	elapsed := dimStyle.Render(" · " + fmtElapsed(time.Since(m.reviewStart)))
+	b.WriteString(truncate(m.spin.View()+" "+activity, w-12) + elapsed + "\n\n")
 	// show the tail of the activity log
 	maxLog := h - 7
 	if maxLog < 3 {
@@ -315,6 +323,14 @@ func (m *Model) emptyStateBody() string {
 		b.WriteString(dimStyle.Render("  · if it works there but not here, you launched silly-review from inside a Claude Code session — open a plain terminal.") + "\n")
 	}
 	return b.String()
+}
+
+func fmtElapsed(d time.Duration) string {
+	s := int(d.Seconds())
+	if s < 0 {
+		s = 0
+	}
+	return fmt.Sprintf("%d:%02d", s/60, s%60)
 }
 
 func firstLineOf(s string) string {

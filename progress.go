@@ -16,12 +16,13 @@ import (
 // It always writes to the given writer (stderr in practice) so piped stdout —
 // the report or --json — stays clean.
 type progress struct {
-	w    io.Writer
-	tty  bool
-	mu   sync.Mutex
-	last string
-	quit chan struct{}
-	wg   sync.WaitGroup
+	w       io.Writer
+	tty     bool
+	mu      sync.Mutex
+	last    string
+	started time.Time
+	quit    chan struct{}
+	wg      sync.WaitGroup
 }
 
 func newProgress(w io.Writer) *progress {
@@ -38,6 +39,7 @@ func (p *progress) start() {
 	if !p.tty {
 		return
 	}
+	p.started = time.Now()
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
@@ -53,8 +55,9 @@ func (p *progress) start() {
 				p.mu.Lock()
 				msg := p.last
 				p.mu.Unlock()
+				el := time.Since(p.started)
 				// \r returns to col 0, \033[2K clears the line.
-				fmt.Fprintf(p.w, "\r\033[2K%c %s", frames[i%len(frames)], clip(msg, 72))
+				fmt.Fprintf(p.w, "\r\033[2K%c %s  (%s)", frames[i%len(frames)], clip(msg, 64), fmtDur(el))
 				i++
 			}
 		}
@@ -66,9 +69,19 @@ func (p *progress) event(e review.Event) {
 	p.mu.Lock()
 	p.last = e.Text
 	p.mu.Unlock()
-	if !p.tty {
+	// Thinking deltas only feed the in-place spinner; printing them as lines
+	// would flood piped output.
+	if !p.tty && e.Kind != review.EvtThinking {
 		fmt.Fprintf(p.w, "· %s\n", e.Text)
 	}
+}
+
+func fmtDur(d time.Duration) string {
+	s := int(d.Seconds())
+	if s < 0 {
+		s = 0
+	}
+	return fmt.Sprintf("%d:%02d", s/60, s%60)
 }
 
 func (p *progress) stop() {

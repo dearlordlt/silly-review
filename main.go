@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 
@@ -37,6 +38,7 @@ func main() {
 	root := &cobra.Command{
 		Use:           "silly-review",
 		Short:         "Senior-engineer code reviews of remote branches, powered by Claude — read-only, never touches your working tree.",
+		Version:       buildVersion(),
 		Args:          cobra.NoArgs,
 		RunE:          runReview,
 		SilenceUsage:  true,
@@ -110,6 +112,33 @@ func runReview(cmd *cobra.Command, _ []string) error {
 		Fetch:     !flagNoFetch,
 		BinPath:   bin,
 	})
+}
+
+// buildVersion reports the VCS revision Go embeds at build time, so
+// `silly-review --version` makes a stale binary obvious.
+func buildVersion() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "dev"
+	}
+	var rev, mod string
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			if s.Value == "true" {
+				mod = "+dirty"
+			}
+		}
+	}
+	if rev == "" {
+		return "dev"
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	return rev + mod
 }
 
 // claudeBin returns the claude binary to invoke. SILLY_REVIEW_CLAUDE overrides

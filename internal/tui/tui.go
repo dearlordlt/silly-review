@@ -5,6 +5,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -93,9 +94,11 @@ type Model struct {
 	styleCur int
 	modelCur int
 
-	spin     spinner.Model
-	logLines []string
-	costUSD  float64
+	spin        spinner.Model
+	logLines    []string
+	curActivity string
+	reviewStart time.Time
+	costUSD     float64
 
 	reviews   []render.RepoReview
 	flat      []review.Finding
@@ -118,6 +121,7 @@ type repoLoadedMsg struct {
 
 type logMsg struct{ repo, text string }
 type retryMsg struct{ text string }
+type thinkMsg struct{ text string }
 type allDoneMsg struct {
 	reviews []render.RepoReview
 	cost    float64
@@ -193,6 +197,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.waitForEvent()
 	case retryMsg:
 		m.appendLog("", msg.text)
+		return m, m.waitForEvent()
+	case thinkMsg:
+		// Status-line only — don't pollute the activity log with token spam.
+		m.curActivity = msg.text
 		return m, m.waitForEvent()
 	case allDoneMsg:
 		return m.onAllDone(msg)
@@ -474,6 +482,8 @@ func (m *Model) keyModel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) startReview() tea.Cmd {
 	m.screen = scProgress
 	m.logLines = nil
+	m.curActivity = "starting…"
+	m.reviewStart = time.Now()
 	m.events = make(chan tea.Msg, 256)
 	style := review.Styles[m.styleCur]
 	model := modelChoices[m.modelCur].key
@@ -496,6 +506,7 @@ func (m *Model) waitForEvent() tea.Cmd {
 }
 
 func (m *Model) appendLog(repo, text string) {
+	m.curActivity = text
 	line := text
 	if repo != "" {
 		line = lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render(repo) + "  " + text

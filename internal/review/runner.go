@@ -81,7 +81,7 @@ func BuildArgs(opts Options) []string {
 	args := []string{
 		"-p", opts.Prompt,
 		"--model", opts.Model,
-		"--output-format", "stream-json", "--verbose",
+		"--output-format", "stream-json", "--verbose", "--include-partial-messages",
 		"--json-schema", SchemaJSON,
 		"--permission-mode", "dontAsk",
 		"--append-system-prompt", opts.System,
@@ -104,6 +104,7 @@ const (
 	EvtTool
 	EvtRetry
 	EvtResult
+	EvtThinking // streamed partial text while Claude is generating (status-line only)
 )
 
 // Event is a progress update surfaced to the TUI.
@@ -136,6 +137,12 @@ type streamLine struct {
 			Input json.RawMessage `json:"input"`
 		} `json:"content"`
 	} `json:"message"`
+	Event struct {
+		Delta struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"delta"`
+	} `json:"event"`
 	Attempt           int             `json:"attempt"`
 	Error             string          `json:"error"`
 	IsError           bool            `json:"is_error"`
@@ -174,6 +181,8 @@ func Run(ctx context.Context, opts Options, onEvent func(Event)) (*Result, error
 
 	res := &Result{}
 	sawResult := false
+	var thinkBuf strings.Builder
+	lastThink := 0
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
 	for sc.Scan() {
@@ -182,6 +191,17 @@ func Run(ctx context.Context, opts Options, onEvent func(Event)) (*Result, error
 			continue
 		}
 		switch sl.Type {
+		case "stream_event":
+			// Live token stream while Claude generates — surfaced only as a
+			// status-line ticker so the UI shows motion during the long, quiet
+			// final phase. Throttled so we don't emit an event per token.
+			if sl.Event.Delta.Type == "text_delta" && sl.Event.Delta.Text != "" {
+				thinkBuf.WriteString(sl.Event.Delta.Text)
+				if thinkBuf.Len()-lastThink >= 48 || strings.Contains(sl.Event.Delta.Text, "\n") {
+					onEvent(Event{Kind: EvtThinking, Text: tailLine(thinkBuf.String())})
+					lastThink = thinkBuf.Len()
+				}
+			}
 		case "system":
 			if sl.Subtype == "api_retry" {
 				reason := sl.Error
@@ -290,6 +310,22 @@ func firstLine(s string) string {
 	const max = 80
 	if len(s) > max {
 		s = s[:max-1] + "…"
+	}
+	return s
+}
+
+// tailLine returns the most recent line of streamed text, capped, so the status
+// line shows what Claude is writing right now.
+func tailLine(s string) string {
+	s = strings.TrimRight(s, " \t\r")
+	if i := strings.LastIndexByte(s, '\n'); i >= 0 {
+		s = s[i+1:]
+	}
+	s = strings.TrimSpace(s)
+	const max = 64
+	r := []rune(s)
+	if len(r) > max {
+		return "…" + string(r[len(r)-max:])
 	}
 	return s
 }

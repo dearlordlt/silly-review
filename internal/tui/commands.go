@@ -103,11 +103,14 @@ func runReviews(ctx context.Context, ws *gitx.Workspace, picks []*repoPick, styl
 			BinPath:         binPath,
 		}
 		res, err := review.Run(ctx, opts, func(e review.Event) {
-			if e.Kind == review.EvtRetry {
+			switch e.Kind {
+			case review.EvtRetry:
 				send(retryMsg{text: e.Text})
-				return
+			case review.EvtThinking:
+				send(thinkMsg{text: e.Text})
+			default:
+				send(logMsg{repo: pr.pick.repo.Name, text: e.Text})
 			}
-			send(logMsg{repo: pr.pick.repo.Name, text: e.Text})
 		})
 		if ctx.Err() != nil {
 			return
