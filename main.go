@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"syscall"
@@ -54,6 +56,7 @@ func main() {
 	root.Flags().StringVar(&flagOut, "out", "", "with --no-tui, also write the markdown report to this file")
 
 	root.AddCommand(configCmd())
+	root.AddCommand(updateCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "silly-review: "+err.Error())
@@ -280,6 +283,50 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// setupURL is the canonical installer, reused by `silly-review update`.
+const setupURL = "https://raw.githubusercontent.com/dearlordlt/silly-review/main/setup.sh"
+
+// updateCmd re-runs the installer, targeting the directory of the currently
+// running binary so it updates this copy in place.
+func updateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "update",
+		Short: "Update silly-review in place to the latest version",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			exe, err := os.Executable()
+			if err != nil {
+				return err
+			}
+			if resolved, e := filepath.EvalSymlinks(exe); e == nil {
+				exe = resolved
+			}
+			dir := filepath.Dir(exe)
+
+			var pipe string
+			switch {
+			case haveCmd("curl"):
+				pipe = "curl -fsSL " + setupURL + " | sh"
+			case haveCmd("wget"):
+				pipe = "wget -qO- " + setupURL + " | sh"
+			default:
+				return fmt.Errorf("need curl or wget to self-update; re-run the install command from the README")
+			}
+
+			fmt.Fprintf(os.Stderr, "updating %s (currently %s)…\n", exe, buildVersion())
+			c := exec.CommandContext(cmd.Context(), "sh", "-c", pipe)
+			c.Env = append(os.Environ(), "INSTALL_DIR="+dir)
+			c.Stdout, c.Stderr = os.Stdout, os.Stderr
+			return c.Run()
+		},
+	}
+}
+
+func haveCmd(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }
 
 func configCmd() *cobra.Command {
