@@ -16,14 +16,17 @@ It never touches your working tree. You can be mid-work on your own branch and r
 ## Install
 
 ```sh
-go build -o bin/silly-review .
-# put it on your PATH, e.g.
-install bin/silly-review ~/.local/bin/
-# optional alias
-alias sr=silly-review
+curl -fsSL https://raw.githubusercontent.com/dearlordlt/silly-review/main/setup.sh | sh
 ```
 
-Requires Go 1.26+, git, and an authenticated `claude` CLI (run `claude` once and sign in).
+This clones, builds, and installs `silly-review` to `~/.local/bin` (override with `INSTALL_DIR=…`, pick a ref with `BRANCH=…`). Or build from source:
+
+```sh
+git clone https://github.com/dearlordlt/silly-review && cd silly-review
+go build -o bin/silly-review . && install bin/silly-review ~/.local/bin/
+```
+
+Requires Go 1.24+, git, and an authenticated `claude` CLI (install [Claude Code](https://claude.com/claude-code) and run `claude` once to sign in). Optional: `alias sr=silly-review`.
 
 ## Use
 
