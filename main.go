@@ -304,22 +304,40 @@ func updateCmd() *cobra.Command {
 				exe = resolved
 			}
 			dir := filepath.Dir(exe)
+			ctx := cmd.Context()
 
-			var pipe string
+			// Download the installer to a temp file and run it only if the
+			// download succeeded. A `curl | sh` pipe hides a download failure —
+			// sh exits 0 on empty stdin — so update could no-op yet report success.
+			script, err := os.CreateTemp("", "silly-review-setup-*.sh")
+			if err != nil {
+				return err
+			}
+			defer os.Remove(script.Name())
+			script.Close()
+
+			var dl *exec.Cmd
 			switch {
 			case haveCmd("curl"):
-				pipe = "curl -fsSL " + setupURL + " | sh"
+				dl = exec.CommandContext(ctx, "curl", "-fsSL", "-o", script.Name(), setupURL)
 			case haveCmd("wget"):
-				pipe = "wget -qO- " + setupURL + " | sh"
+				dl = exec.CommandContext(ctx, "wget", "-qO", script.Name(), setupURL)
 			default:
 				return fmt.Errorf("need curl or wget to self-update; re-run the install command from the README")
 			}
+			dl.Stderr = os.Stderr
+			if err := dl.Run(); err != nil {
+				return fmt.Errorf("downloading installer from %s: %w", setupURL, err)
+			}
+			if fi, err := os.Stat(script.Name()); err != nil || fi.Size() == 0 {
+				return fmt.Errorf("downloaded installer from %s was empty", setupURL)
+			}
 
 			fmt.Fprintf(os.Stderr, "updating %s (currently %s)…\n", exe, buildVersion())
-			c := exec.CommandContext(cmd.Context(), "sh", "-c", pipe)
-			c.Env = append(os.Environ(), "INSTALL_DIR="+dir)
-			c.Stdout, c.Stderr = os.Stdout, os.Stderr
-			return c.Run()
+			run := exec.CommandContext(ctx, "sh", script.Name())
+			run.Env = append(os.Environ(), "INSTALL_DIR="+dir)
+			run.Stdout, run.Stderr = os.Stdout, os.Stderr
+			return run.Run()
 		},
 	}
 }
