@@ -49,25 +49,36 @@ info "Cloning $REPO_URL ($BRANCH)…"
 git clone --quiet --depth 1 --branch "$BRANCH" "$REPO_URL" "$tmp/src" \
 	|| die "clone failed — check the repo URL and branch."
 
-# Required Go floor comes from the cloned go.mod (e.g. "go 1.24.2" -> 1 / 24).
+# Required Go floor from the cloned go.mod (e.g. "go 1.24.2" -> 1 / 24 / 2).
+# The patch matters: with GOTOOLCHAIN=local, go1.24.0 can't build a "go 1.24.2"
+# module, so we must reject it and download a new-enough toolchain.
 mingo="$(awk '/^go /{print $2; exit}' "$tmp/src/go.mod")"
 MIN_MAJOR="${mingo%%.*}"
 rest="${mingo#*.}"
 MIN_MINOR="${rest%%.*}"
-[ -n "$MIN_MAJOR" ] && [ -n "$MIN_MINOR" ] || { MIN_MAJOR=1; MIN_MINOR=24; }
+case "$rest" in *.*) MIN_PATCH="${rest#*.}"; MIN_PATCH="${MIN_PATCH%%.*}" ;; *) MIN_PATCH=0 ;; esac
+case "$MIN_MAJOR$MIN_MINOR$MIN_PATCH" in *[!0-9]*) MIN_MAJOR=1; MIN_MINOR=24; MIN_PATCH=0 ;; esac
 
-# go_ok GOBIN — true if that Go is >= the required floor.
+# go_ok GOBIN — true if that Go is >= the required floor (major.minor.patch).
 go_ok() {
-	v="$("$1" version 2>/dev/null | awk '{print $3}')" # e.g. go1.24.5
+	v="$("$1" version 2>/dev/null | awk '{print $3}')" # e.g. go1.24.5 or go1.25rc1
 	v="${v#go}"
 	[ -n "$v" ] || return 1
 	maj="${v%%.*}"
 	r="${v#*.}"
 	min="${r%%.*}"
-	case "$maj$min" in *[!0-9]*) return 1 ;; esac
-	[ "$maj" -gt "$MIN_MAJOR" ] && return 0
-	[ "$maj" -eq "$MIN_MAJOR" ] && [ "$min" -ge "$MIN_MINOR" ] && return 0
-	return 1
+	case "$r" in *.*) pat="${r#*.}"; pat="${pat%%.*}" ;; *) pat=0 ;; esac
+	# Drop any prerelease suffix so go1.25rc1 reads as 1.25.0.
+	maj="${maj%%[!0-9]*}"
+	min="${min%%[!0-9]*}"
+	pat="${pat%%[!0-9]*}"
+	[ -n "$maj" ] && [ -n "$min" ] || return 1
+	[ -n "$pat" ] || pat=0
+	if [ "$maj" -gt "$MIN_MAJOR" ]; then return 0; fi
+	if [ "$maj" -lt "$MIN_MAJOR" ]; then return 1; fi
+	if [ "$min" -gt "$MIN_MINOR" ]; then return 0; fi
+	if [ "$min" -lt "$MIN_MINOR" ]; then return 1; fi
+	[ "$pat" -ge "$MIN_PATCH" ]
 }
 
 distro_hint() {

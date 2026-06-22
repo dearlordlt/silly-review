@@ -9,6 +9,10 @@
   Env overrides: $env:INSTALL_DIR, $env:BRANCH, $env:REPO_URL
 #>
 $ErrorActionPreference = 'Stop'
+# On PowerShell 7.4+ a non-zero native exit would otherwise throw before our
+# explicit $LASTEXITCODE checks (git clone / go build) run — disable that so the
+# friendly error messages below are what the user sees. (No-op on PS 5.1.)
+$PSNativeCommandUseErrorActionPreference = $false
 
 $RepoUrl    = if ($env:REPO_URL)    { $env:REPO_URL }    else { 'https://github.com/dearlordlt/silly-review' }
 $Branch     = if ($env:BRANCH)      { $env:BRANCH }      else { 'main' }
@@ -33,12 +37,18 @@ try {
   $minGo = ((Get-Content (Join-Path $tmp 'src\go.mod') | Where-Object { $_ -match '^go ' } | Select-Object -First 1) -replace '^go\s+', '').Trim()
   $mp = $minGo.Split('.')
   $minMajor = [int]$mp[0]; $minMinor = [int]$mp[1]
+  $minPatch = if ($mp.Count -ge 3) { [int](($mp[2] -replace '\D.*$', '')) } else { 0 }
 
+  # True if $goExe is >= the required floor (major.minor.patch). The patch
+  # matters under GOTOOLCHAIN=local; prerelease (go1.25rc1) reads as 1.25.0.
   function GoOk($goExe) {
     try { $v = (& $goExe version) 2>$null } catch { return $false }
-    if ("$v" -match 'go(\d+)\.(\d+)') {
+    if ("$v" -match 'go(\d+)\.(\d+)(?:\.(\d+))?') {
       $maj = [int]$Matches[1]; $min = [int]$Matches[2]
-      return ($maj -gt $minMajor) -or (($maj -eq $minMajor) -and ($min -ge $minMinor))
+      $pat = if ($Matches[3]) { [int]$Matches[3] } else { 0 }
+      if ($maj -ne $minMajor) { return ($maj -gt $minMajor) }
+      if ($min -ne $minMinor) { return ($min -gt $minMinor) }
+      return ($pat -ge $minPatch)
     }
     return $false
   }
@@ -52,7 +62,15 @@ try {
     $go = "$DataDir\go\bin\go.exe"; Info "Using the Go previously installed at $DataDir\go."
   }
   else {
-    $arch = switch ($env:PROCESSOR_ARCHITECTURE) { 'AMD64' { 'amd64' } 'ARM64' { 'arm64' } default { 'amd64' } }
+    # Prefer ARCHITEW6432 so a 32-bit (WOW64) PowerShell host reports the real
+    # machine arch; map explicitly and fail on anything unsupported.
+    $rawArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    $arch = switch ($rawArch) {
+      'AMD64' { 'amd64' }
+      'ARM64' { 'arm64' }
+      'x86' { '386' }
+      default { throw "unsupported CPU architecture '$rawArch' for automatic Go install — see https://go.dev/dl/" }
+    }
     Info "Go $minMajor.$minMinor+ not found — downloading the official toolchain to $DataDir\go (no admin)…"
     $ver = (((Invoke-WebRequest -UseBasicParsing 'https://go.dev/VERSION?m=text').Content) -split "`n")[0].Trim()
     if ($ver -notmatch '^go') { throw "couldn't determine the latest Go version." }
@@ -74,26 +92,34 @@ try {
 
   New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
   $dst = Join-Path $InstallDir $Bin
-  $old = ''
-  if (Test-Path $dst) { try { $old = ((& $dst --version) -split '\s+')[-1] } catch { } }
+  $oldVer = ''
+  if (Test-Path $dst) { try { $oldVer = ((& $dst --version) -split '\s+')[-1] } catch { } }
 
-  # Windows locks a running .exe, but allows renaming it — so move the old one
-  # aside (enables self-update) then drop the new one in.
+  # Windows locks a running .exe but allows renaming it. Move it aside under a
+  # UNIQUE name — a fixed ".old" could still be held by a prior running instance
+  # and block the move — then drop the new one in.
   if (Test-Path $dst) {
-    Remove-Item -Force "$dst.old" -ErrorAction SilentlyContinue
-    Move-Item -Force $dst "$dst.old"
+    $aside = "$dst.old-" + [guid]::NewGuid().ToString('N')
+    Move-Item -Force $dst $aside
+    Remove-Item -Force $aside -ErrorAction SilentlyContinue # no-op if still running; swept later
   }
   Copy-Item -Force (Join-Path $tmp $Bin) $dst
-  Remove-Item -Force "$dst.old" -ErrorAction SilentlyContinue  # may be locked if still running; harmless
+  # Sweep asides freed since a previous run.
+  Get-ChildItem -LiteralPath $InstallDir -Filter "$Bin.old-*" -ErrorAction SilentlyContinue |
+    ForEach-Object { Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue }
 
-  $new = ((& $dst --version) -split '\s+')[-1]
-  if (-not $old) { Info "Installed silly-review $new -> $dst" }
-  elseif ($old -eq $new) { Info "Already up to date (silly-review $new)." }
-  else { Info "Updated silly-review $old -> $new" }
+  $newVer = ''
+  try { $newVer = ((& $dst --version) -split '\s+')[-1] } catch { }
+  if (-not $newVer) { $newVer = '(unknown)' }
+  if (-not $oldVer) { Info "Installed silly-review $newVer -> $dst" }
+  elseif ($oldVer -eq $newVer) { Info "Already up to date (silly-review $newVer)." }
+  else { Info "Updated silly-review $oldVer -> $newVer" }
 
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+  if (-not $userPath) { $userPath = '' } # fresh profiles have no user PATH
   if (($userPath -split ';') -notcontains $InstallDir) {
-    [Environment]::SetEnvironmentVariable('Path', ($userPath.TrimEnd(';') + ';' + $InstallDir), 'User')
+    $newPath = if ($userPath) { $userPath.TrimEnd(';') + ';' + $InstallDir } else { $InstallDir }
+    [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
     Warn "Added $InstallDir to your user PATH — open a new terminal for it to take effect."
   }
 
