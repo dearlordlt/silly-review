@@ -26,6 +26,7 @@ const (
 	scLoading
 	scBranchSelect
 	scBaseConfig
+	scMatch
 	scStyle
 	scModel
 	scProgress
@@ -38,6 +39,16 @@ type repoPick struct {
 	repo   *gitx.Repo
 	base   string // resolved base ref, e.g. "origin/main"
 	branch gitx.Branch
+
+	// Eager-load cache (multi-repo mode loads every selected repo up front so the
+	// cross-repo match step can compare branch names without extra git calls).
+	branches  []gitx.Branch
+	baseCands []string
+	defBranch string
+	loadErr   error
+
+	decided bool // a branch was chosen, or the repo was skipped
+	dropped bool // excluded from the review (skipped, or failed to load)
 }
 
 type modelOpt struct{ key, desc string }
@@ -92,9 +103,17 @@ type Model struct {
 	brCur      int
 	loadingMsg string
 
-	baseCands  []string
-	baseCur    int
-	baseReturn screen
+	baseCands   []string
+	baseCur     int
+	baseReturn  screen
+	baseAdvance bool // when set, base-config enter advances the cross-repo flow
+
+	// cross-repo matching
+	loadRemain       int          // eager-load fan-in counter
+	anchorBranchName string       // name of the first actively-picked branch ("" = none yet)
+	anchorAuthor     string       // its author (used only to word the match prompt)
+	matched          *gitx.Branch // matched branch in the current repo, or nil (no match)
+	matchCur         int          // cursor over the match-screen options
 
 	styleCur int
 	modelCur int
@@ -226,6 +245,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.keyBranchSelect(msg)
 	case scBaseConfig:
 		return m.keyBaseConfig(msg)
+	case scMatch:
+		return m.keyMatch(msg)
 	case scStyle:
 		return m.keyStyle(msg)
 	case scModel:
@@ -268,21 +289,22 @@ func (m *Model) keyRepoSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		sel := m.selectedRepoIdx()
 		if len(sel) == 0 {
-			m.statusMsg = "select at least one repo (space to toggle)"
+			m.statusMsg = "Check at least one repo first — press space to toggle the highlighted row."
 			return m, nil
 		}
+		m.statusMsg = ""
 		m.picks = nil
 		var names []string
 		for _, i := range sel {
 			m.picks = append(m.picks, &repoPick{repo: m.repos[i]})
 			names = append(names, m.repos[i].Name)
 		}
+		// Remember the full selection (before any later skip) for next time.
 		fc := m.cfg.Folder(m.folderKey)
 		fc.LastRepos = names
 		m.cfg.SetFolder(m.folderKey, fc)
 		_ = m.cfg.Save()
-		m.cur = 0
-		return m, m.startLoadingRepo()
+		return m, m.startEagerLoad()
 	}
 	return m, nil
 }
@@ -306,6 +328,20 @@ func (m *Model) startLoadingRepo() tea.Cmd {
 	return tea.Batch(loadRepoCmd(m.ctx, r, m.fetch, m.cur), m.spin.Tick)
 }
 
+// startEagerLoad (multi-repo) fetches every selected repo's branches up front so
+// the cross-repo match step can compare names without stalling.
+func (m *Model) startEagerLoad() tea.Cmd {
+	m.screen = scLoading
+	m.loadRemain = len(m.picks)
+	m.loadingMsg = fmt.Sprintf("Loaded 0 of %d repos…", len(m.picks))
+	cmds := make([]tea.Cmd, 0, len(m.picks)+1)
+	for i, p := range m.picks {
+		cmds = append(cmds, loadRepoCmd(m.ctx, p.repo, m.fetch, i))
+	}
+	cmds = append(cmds, m.spin.Tick)
+	return tea.Batch(cmds...)
+}
+
 func loadRepoCmd(ctx context.Context, repo *gitx.Repo, fetch bool, idx int) tea.Cmd {
 	return func() tea.Msg {
 		if repo.Remote == "" {
@@ -327,22 +363,75 @@ func loadRepoCmd(ctx context.Context, repo *gitx.Repo, fetch bool, idx int) tea.
 }
 
 func (m *Model) onRepoLoaded(msg repoLoadedMsg) (tea.Model, tea.Cmd) {
+	// Single-repo (lazy) mode: one repo, hard-fail on error — nothing to fall back to.
+	if m.disc.Mode != discover.Multi {
+		if msg.err != nil {
+			m.err = msg.err
+			m.screen = scError
+			return m, nil
+		}
+		p := m.picks[m.cur]
+		p.branches, p.baseCands, p.defBranch = msg.branches, msg.candidates, msg.defaultBranch
+		m.loadPickIntoView(p)
+		if base, ok := m.cfg.RepoBase(p.repo.Path); ok {
+			p.base = base
+			m.screen = scBranchSelect
+			return m, nil
+		}
+		m.baseReturn = scBranchSelect
+		m.baseAdvance = false
+		m.screen = scBaseConfig
+		return m, nil
+	}
+
+	// Multi-repo (eager) mode: fan-in. A repo that fails to load is auto-dropped
+	// rather than aborting the whole run; only all-failed ends in an error.
+	p := m.picks[msg.idx]
 	if msg.err != nil {
-		m.err = msg.err
-		m.screen = scError
+		p.loadErr = msg.err
+		p.dropped = true
+		p.decided = true
+	} else {
+		p.branches, p.baseCands, p.defBranch = msg.branches, msg.candidates, msg.defaultBranch
+	}
+	if m.loadRemain--; m.loadRemain > 0 {
+		m.loadingMsg = fmt.Sprintf("Loaded %d of %d repos…", len(m.picks)-m.loadRemain, len(m.picks))
 		return m, nil
 	}
-	m.branches = msg.branches
+	return m.beginFirstRepo()
+}
+
+// loadPickIntoView copies a pick's cached branch/base data into the live
+// selection state used by the branch/base screens.
+func (m *Model) loadPickIntoView(p *repoPick) {
+	m.branches = p.branches
 	m.brCur = 0
-	m.baseCands = msg.candidates
+	m.baseCands = p.baseCands
 	m.baseCur = 0
-	if base, ok := m.cfg.RepoBase(m.picks[m.cur].repo.Path); ok {
-		m.picks[m.cur].base = base
-		m.screen = scBranchSelect
+}
+
+// beginFirstRepo runs once all repos are loaded: it drives the first surviving
+// repo to its base/branch picker (that repo becomes the anchor when its branch
+// is chosen).
+func (m *Model) beginFirstRepo() (tea.Model, tea.Cmd) {
+	for i, p := range m.picks {
+		if p.dropped {
+			continue
+		}
+		m.cur = i
+		m.loadPickIntoView(p)
+		if base, ok := m.cfg.RepoBase(p.repo.Path); ok {
+			p.base = base
+			m.screen = scBranchSelect
+		} else {
+			m.baseReturn = scBranchSelect
+			m.baseAdvance = false
+			m.screen = scBaseConfig
+		}
 		return m, nil
 	}
-	m.baseReturn = scBranchSelect
-	m.screen = scBaseConfig
+	m.err = fmt.Errorf("every selected repo failed to load branches — nothing to review")
+	m.screen = scError
 	return m, nil
 }
 
@@ -381,6 +470,7 @@ func (m *Model) keyBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "c":
 		m.statusMsg = ""
 		m.baseReturn = scBranchSelect
+		m.baseAdvance = false
 		m.baseCur = 0
 		m.screen = scBaseConfig
 	case "enter":
@@ -388,18 +478,20 @@ func (m *Model) keyBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Reviewing the base against itself yields an empty diff — catch it here
 		// rather than spinning up a worktree and a no-op review.
 		if sel.Ref == m.picks[m.cur].base {
-			m.statusMsg = fmt.Sprintf("%s is the base branch — pick the branch you want to review, or press c to change the base", sel.Name)
+			m.statusMsg = fmt.Sprintf("%s is the base branch itself — there'd be nothing to diff. Pick the branch you want reviewed, or press c to change the base.", sel.Name)
 			return m, nil
 		}
 		m.statusMsg = ""
-		m.picks[m.cur].branch = sel
-		m.cur++
-		if m.cur < len(m.picks) {
-			return m, m.startLoadingRepo()
+		p := m.picks[m.cur]
+		p.branch = sel
+		p.decided = true
+		// The first branch the user actively picks is the anchor; its name is
+		// matched against the other repos.
+		if m.anchorBranchName == "" {
+			m.anchorBranchName = sel.Name
+			m.anchorAuthor = sel.Author
 		}
-		m.screen = scStyle
-		m.styleCur = indexOfStyle(m.cfg.Folder(m.folderKey).Style)
-		return m, nil
+		return m.advanceToNextUndecided()
 	}
 	return m, nil
 }
@@ -430,8 +522,177 @@ func (m *Model) keyBaseConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cfg.SetRepoBase(m.picks[m.cur].repo.Path, base)
 		_ = m.cfg.Save()
 		m.picks[m.cur].base = base
+		if m.baseAdvance {
+			m.baseAdvance = false
+			return m.advanceToNextUndecided()
+		}
 		m.screen = m.baseReturn
 	}
+	return m, nil
+}
+
+// ---- cross-repo matching ----
+
+// advanceToNextUndecided drives the next undecided repo to its match screen, or
+// moves on to the style screen when every repo has been decided.
+func (m *Model) advanceToNextUndecided() (tea.Model, tea.Cmd) {
+	for i, p := range m.picks {
+		if p.decided || p.dropped {
+			continue
+		}
+		return m.presentMatch(i)
+	}
+	return m.toStyleOrError()
+}
+
+// presentMatch computes whether repo i has a branch matching the anchor and
+// shows the match screen.
+func (m *Model) presentMatch(i int) (tea.Model, tea.Cmd) {
+	m.cur = i
+	p := m.picks[i]
+	m.loadPickIntoView(p)
+	m.matchCur = 0
+	m.statusMsg = ""
+	if b, ok := findBranchByName(p.branches, m.anchorBranchName); ok {
+		m.matched = &b
+	} else {
+		m.matched = nil
+	}
+	m.screen = scMatch
+	return m, nil
+}
+
+func findBranchByName(branches []gitx.Branch, name string) (gitx.Branch, bool) {
+	for _, b := range branches {
+		if b.Name == name {
+			return b, true
+		}
+	}
+	return gitx.Branch{}, false
+}
+
+// matchOptionCount is 3 when there's a match (Yes/Skip/Manual), else 2 (Skip/Manual).
+func (m *Model) matchOptionCount() int {
+	if m.matched != nil {
+		return 3
+	}
+	return 2
+}
+
+func (m *Model) keyMatch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	n := m.matchOptionCount()
+	switch msg.String() {
+	case "q", "esc":
+		return m, tea.Quit
+	case "up", "k":
+		if m.matchCur > 0 {
+			m.matchCur--
+		}
+	case "down", "j":
+		if m.matchCur < n-1 {
+			m.matchCur++
+		}
+	case "y":
+		if m.matched != nil {
+			return m.matchYes()
+		}
+	case "s":
+		return m.matchSkip()
+	case "m":
+		return m.matchManual()
+	case "enter":
+		if m.matched != nil {
+			switch m.matchCur {
+			case 0:
+				return m.matchYes()
+			case 1:
+				return m.matchSkip()
+			case 2:
+				return m.matchManual()
+			}
+		}
+		switch m.matchCur {
+		case 0:
+			return m.matchSkip()
+		case 1:
+			return m.matchManual()
+		}
+	}
+	return m, nil
+}
+
+func (m *Model) matchYes() (tea.Model, tea.Cmd) {
+	p := m.picks[m.cur]
+	mb := *m.matched
+
+	// Resolve a base: a remembered one, else the detected default (persist it so
+	// matched repos don't re-prompt). Only fall through to the base picker if
+	// neither exists.
+	base, ok := m.cfg.RepoBase(p.repo.Path)
+	if !ok && p.defBranch != "" {
+		base = p.defBranch
+		m.cfg.SetRepoBase(p.repo.Path, base)
+		_ = m.cfg.Save()
+		ok = true
+	}
+	if ok {
+		p.base = base
+		if mb.Ref == p.base {
+			m.statusMsg = fmt.Sprintf("That branch is %s's base — nothing to diff. Pick another.", p.repo.Name)
+			return m.matchManual()
+		}
+		p.branch = mb
+		p.decided = true
+		return m.advanceToNextUndecided()
+	}
+
+	// No base known: set the branch now, ask for a base, then continue.
+	p.branch = mb
+	p.decided = true
+	m.baseAdvance = true
+	m.baseCur = 0
+	m.screen = scBaseConfig
+	return m, nil
+}
+
+func (m *Model) matchSkip() (tea.Model, tea.Cmd) {
+	p := m.picks[m.cur]
+	p.dropped = true
+	p.decided = true
+	m.statusMsg = ""
+	return m.advanceToNextUndecided()
+}
+
+func (m *Model) matchManual() (tea.Model, tea.Cmd) {
+	p := m.picks[m.cur]
+	m.loadPickIntoView(p)
+	m.statusMsg = ""
+	if base, ok := m.cfg.RepoBase(p.repo.Path); ok {
+		p.base = base
+		m.screen = scBranchSelect
+	} else {
+		m.baseReturn = scBranchSelect
+		m.baseAdvance = false
+		m.screen = scBaseConfig
+	}
+	return m, nil
+}
+
+// toStyleOrError proceeds to the style screen, unless every repo was skipped.
+func (m *Model) toStyleOrError() (tea.Model, tea.Cmd) {
+	active := 0
+	for _, p := range m.picks {
+		if !p.dropped {
+			active++
+		}
+	}
+	if active == 0 {
+		m.err = fmt.Errorf("every selected repo was skipped or had no reviewable branch — nothing to review")
+		m.screen = scError
+		return m, nil
+	}
+	m.screen = scStyle
+	m.styleCur = indexOfStyle(m.cfg.Folder(m.folderKey).Style)
 	return m, nil
 }
 
@@ -493,8 +754,16 @@ func (m *Model) startReview() tea.Cmd {
 	m.events = make(chan tea.Msg, 256)
 	style := review.Styles[m.styleCur]
 	model := modelChoices[m.modelCur].key
+	// Only review repos that weren't skipped or failed to load — dropped repos
+	// must not get a worktree nor leak into another repo's cross-repo context.
+	var active []*repoPick
+	for _, p := range m.picks {
+		if !p.dropped {
+			active = append(active, p)
+		}
+	}
 	return tea.Batch(
-		launchReview(m.ctx, m.ws, m.picks, style, model, m.binPath, m.events),
+		launchReview(m.ctx, m.ws, active, style, model, m.binPath, m.events),
 		m.waitForEvent(),
 		m.spin.Tick,
 	)
