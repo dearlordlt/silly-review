@@ -62,6 +62,8 @@ func (m *Model) View() string {
 		return m.viewBranchSelect()
 	case scBaseConfig:
 		return m.viewBaseConfig()
+	case scMatch:
+		return m.viewMatch()
 	case scStyle:
 		return m.viewStyle()
 	case scModel:
@@ -97,7 +99,8 @@ func (m *Model) statusLine() string {
 
 func (m *Model) viewRepoSelect() string {
 	var b strings.Builder
-	b.WriteString(header("select repositories", "a feature can span several repos — pick all that apply"))
+	b.WriteString(header("pick the repos this change touches",
+		"A feature can span several repos (frontend, backend, deploy). Check every repo involved — you'll choose one branch per repo next. Last run's picks are pre-checked."))
 	for i, r := range m.repos {
 		cursor := "  "
 		if i == m.repoCur {
@@ -112,23 +115,30 @@ func (m *Model) viewRepoSelect() string {
 	if m.statusMsg != "" {
 		b.WriteString("\n" + dimStyle.Render(m.statusMsg))
 	}
-	b.WriteString("\n" + helpStyle.Render("↑/↓ move · space toggle · a all · enter confirm · q quit"))
+	b.WriteString("\n" + helpStyle.Render("↑/↓ move · space check/uncheck · a check all · enter continue · q quit"))
 	return b.String()
 }
 
 func (m *Model) viewLoading() string {
-	return header("loading", "") + m.spin.View() + " " + m.loadingMsg
+	return header("loading branches", "Fetching the remote branch list — read-only, nothing is checked out.") +
+		m.spin.View() + " " + m.loadingMsg
 }
 
 func (m *Model) viewBranchSelect() string {
 	w, _ := m.dims()
 	p := m.picks[m.cur]
-	sub := fmt.Sprintf("%s  ·  base: %s", p.repo.Name, p.base)
-	if len(m.picks) > 1 {
-		sub = fmt.Sprintf("repo %d/%d — %s", m.cur+1, len(m.picks), sub)
+	var sub string
+	switch {
+	case len(m.picks) <= 1:
+		sub = fmt.Sprintf("%s  ·  diffed against %s  ·  remote branches, newest first", p.repo.Name, p.base)
+	case m.anchorBranchName == "":
+		// The anchor repo — its branch name drives matching in the others.
+		sub = fmt.Sprintf("repo 1/%d · %s  ·  base %s  ·  this branch's name is matched against the other repos next", len(m.picks), p.repo.Name, p.base)
+	default:
+		sub = fmt.Sprintf("%s  ·  base %s  ·  newest first", p.repo.Name, p.base)
 	}
 	var b strings.Builder
-	b.WriteString(header("select branch to review", sub))
+	b.WriteString(header(fmt.Sprintf("pick the branch to review in %s", p.repo.Name), sub))
 	for i, br := range m.branches {
 		cursor := "  "
 		name := br.Name
@@ -143,14 +153,15 @@ func (m *Model) viewBranchSelect() string {
 	if m.statusMsg != "" {
 		b.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Render("! "+m.statusMsg) + "\n")
 	}
-	b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter select · c change base · q quit"))
+	b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter review this branch · c change base · q quit"))
 	return b.String()
 }
 
 func (m *Model) viewBaseConfig() string {
 	p := m.picks[m.cur]
 	var b strings.Builder
-	b.WriteString(header("set base branch", fmt.Sprintf("what should %s be diffed against? (remembered for this repo)", p.repo.Name)))
+	b.WriteString(header(fmt.Sprintf("set the base branch for %s", p.repo.Name),
+		fmt.Sprintf("%s's branch is diffed against this — only changes since this branch get reviewed. Usually your trunk (origin/main, origin/master) or integration branch (origin/dev). Asked once per repo, then remembered.", p.repo.Name)))
 	for i, c := range m.baseCands {
 		cursor := "  "
 		label := c
@@ -164,9 +175,81 @@ func (m *Model) viewBaseConfig() string {
 		}
 		b.WriteString(fmt.Sprintf("%s%s%s\n", cursor, label, tag))
 	}
-	help := "↑/↓ move · enter save"
+	help := "↑/↓ move · enter use as base · q quit"
 	if p.base != "" {
-		help += " · esc cancel"
+		help = "↑/↓ move · enter use as base · esc keep current · q quit"
+	}
+	b.WriteString("\n" + helpStyle.Render(help))
+	return b.String()
+}
+
+// viewMatch is the cross-repo step: after the anchor branch is picked, each
+// other repo gets this screen — auto-match (same name), warn (same name, other
+// author), or no-match (drop it here without restarting).
+func (m *Model) viewMatch() string {
+	w, _ := m.dims()
+	p := m.picks[m.cur]
+	bn := m.anchorBranchName
+	warn := lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
+
+	var title, sub string
+	var options []string
+	switch {
+	case m.matched == nil:
+		title = fmt.Sprintf("%s has no '%s' branch", p.repo.Name, bn)
+		sub = fmt.Sprintf("This change may not touch %s. You can drop it here instead of quitting and starting over.", p.repo.Name)
+		options = []string{
+			fmt.Sprintf("[s] Skip %s — leave it out of this review", p.repo.Name),
+			fmt.Sprintf("[m] Pick a branch in %s manually", p.repo.Name),
+		}
+	case m.matched.Author == m.anchorAuthor:
+		title = fmt.Sprintf("%s also has '%s'", p.repo.Name, bn)
+		sub = fmt.Sprintf("Same branch name, same author (%s) — looks like the same change spans %s too.", m.matched.Author, p.repo.Name)
+		options = []string{
+			fmt.Sprintf("[y] Yes — review '%s' in %s too", bn, p.repo.Name),
+			fmt.Sprintf("[s] Skip %s (drop it from this review)", p.repo.Name),
+			fmt.Sprintf("[m] Pick a different branch in %s manually", p.repo.Name),
+		}
+	default:
+		title = fmt.Sprintf("%s has a '%s' branch", p.repo.Name, bn)
+		sub = fmt.Sprintf("Same name, but a different author (%s, not %s) — could be the same change or unrelated. Check before including it.", m.matched.Author, m.anchorAuthor)
+		options = []string{
+			fmt.Sprintf("[y] Yes — review '%s' in %s too", bn, p.repo.Name),
+			fmt.Sprintf("[s] Skip %s (drop it from this review)", p.repo.Name),
+			fmt.Sprintf("[m] Pick a different branch in %s manually", p.repo.Name),
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString(header(title, sub))
+	if m.matched != nil {
+		author := m.matched.Author
+		if m.matched.Author != m.anchorAuthor {
+			author = warn.Render(author)
+		}
+		meta := dimStyle.Render(author + " · " + m.matched.DateRel)
+		row := fmt.Sprintf("  %s  %s  %s", m.matched.Name, truncate(m.matched.Subject, w/2), meta)
+		b.WriteString(truncate(row, w) + "\n")
+		if p.base != "" {
+			b.WriteString(dimStyle.Render("  will be diffed against "+p.base) + "\n")
+		}
+		b.WriteString("\n")
+	}
+	for i, opt := range options {
+		cursor := "  "
+		label := opt
+		if i == m.matchCur {
+			cursor = cursorStyle.Render("▸ ")
+			label = cursorStyle.Render(label)
+		}
+		b.WriteString(cursor + label + "\n")
+	}
+	if m.statusMsg != "" {
+		b.WriteString("\n" + warn.Render("! "+m.statusMsg) + "\n")
+	}
+	help := "↑/↓ move · enter choose · s skip · m manual · q quit"
+	if m.matched != nil {
+		help = "↑/↓ move · enter choose · y yes · s skip · m manual · q quit"
 	}
 	b.WriteString("\n" + helpStyle.Render(help))
 	return b.String()
@@ -174,7 +257,7 @@ func (m *Model) viewBaseConfig() string {
 
 func (m *Model) viewStyle() string {
 	var b strings.Builder
-	b.WriteString(header("review style", "remembered for this folder; change anytime"))
+	b.WriteString(header("choose a review style", "Sets how hard Claude pushes — what it flags and how deep it goes. Remembered for this folder; change anytime."))
 	for i, s := range review.Styles {
 		cursor := "  "
 		name := s.Name
@@ -190,7 +273,7 @@ func (m *Model) viewStyle() string {
 
 func (m *Model) viewModel() string {
 	var b strings.Builder
-	b.WriteString(header("model", "uses your Claude subscription"))
+	b.WriteString(header("choose the model", "Which Claude model runs the review. Bigger reads more carefully but takes longer. Runs on your Claude subscription — no API key, no per-token charge."))
 	for i, mo := range modelChoices {
 		cursor := "  "
 		name := mo.key
@@ -200,14 +283,28 @@ func (m *Model) viewModel() string {
 		}
 		b.WriteString(fmt.Sprintf("%s%-8s %s\n", cursor, name, dimStyle.Render(mo.desc)))
 	}
-	b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter start review · esc back"))
+	b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter start review · esc back · q quit"))
 	return b.String()
 }
 
 func (m *Model) viewProgress() string {
 	w, h := m.dims()
+	n := 0
+	for _, p := range m.picks {
+		if !p.dropped {
+			n++
+		}
+	}
+	if n == 0 {
+		n = 1
+	}
+	noun := "branch"
+	if n > 1 {
+		noun = "branches"
+	}
 	var b strings.Builder
-	b.WriteString(header("reviewing", "this can take a minute — Claude is reading the code"))
+	b.WriteString(header(fmt.Sprintf("reviewing %d %s", n, noun),
+		"Claude is reading each branch's diff and the surrounding code. A minute or two is normal. Read-only — nothing is written to your repos."))
 	// Live status line: spinner + the current action + elapsed time, so it never
 	// looks frozen even during Claude's long, tool-less generation phase.
 	activity := m.curActivity
@@ -399,6 +496,16 @@ func (m *Model) resultSummary() string {
 			parts = append(parts, fmt.Sprintf("%s: prose review", rr.Repo))
 		case rr.Review != nil && rr.Review.Verdict != "":
 			parts = append(parts, fmt.Sprintf("%s: %s", rr.Repo, rr.Review.Verdict))
+		}
+	}
+	// Account for repos that were skipped or failed to load.
+	for _, p := range m.picks {
+		if p.dropped {
+			reason := "skipped"
+			if p.loadErr != nil {
+				reason = "skipped (couldn't load branches)"
+			}
+			parts = append(parts, fmt.Sprintf("%s: %s", p.repo.Name, reason))
 		}
 	}
 	if m.sevFilter != "" {

@@ -42,6 +42,8 @@ silly-review              # multi-select the repos a feature spans
 
 Flow: pick repo(s) → pick the remote branch to review → (first time per repo) set the base branch it’s diffed against → pick a style + model → watch progress → browse findings.
 
+In multi-repo mode, after you pick the first repo's branch silly-review checks the other selected repos for a branch with the same name and offers to **review it too**, **skip that repo**, or **pick a branch manually** — so a frontend-only change doesn't make you slog through (or restart) the backend picker.
+
 **Results keys:** `↑/↓` navigate · `y` copy the selected comment · `Y` copy the whole review · `f` filter by severity · `q` quit.
 
 The base branch (e.g. `origin/dev` vs `origin/main`) is asked once per repo and remembered; change it later with `c` on the branch screen. Style/model are remembered per folder.
