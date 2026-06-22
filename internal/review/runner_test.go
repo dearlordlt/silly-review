@@ -24,11 +24,18 @@ func TestBuildArgsReadOnly(t *testing.T) {
 			t.Errorf("args missing %q\ngot: %s", want, joined)
 		}
 	}
+	// StructuredOutput must be allowed, or --json-schema runs die at the final
+	// step under --permission-mode dontAsk.
+	ai := indexOf(args, "--allowedTools")
+	di := indexOf(args, "--disallowedTools")
+	so := indexOf(args, "StructuredOutput")
+	if so < 0 || !(so > ai && so < di) {
+		t.Errorf("StructuredOutput must be in the allowed set (ai=%d so=%d di=%d)", ai, so, di)
+	}
 	// Edit/Write must be denied (bare names), never allowed.
 	if !contains(args, "Edit") || !contains(args, "Write") {
 		t.Errorf("Edit/Write not in disallowed set: %v", disallowedTools)
 	}
-	di := indexOf(args, "--disallowedTools")
 	if di < 0 {
 		t.Fatal("no --disallowedTools")
 	}

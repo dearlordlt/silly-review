@@ -30,6 +30,11 @@ var allowedTools = []string{
 	"Read", "Grep", "Glob",
 	"Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git blame:*)",
 	"Bash(git status:*)", "Bash(git rev-parse:*)", "Bash(rg:*)", "Bash(cat:*)", "Bash(ls:*)",
+	// Internal, non-filesystem tools the review needs. StructuredOutput is how
+	// --json-schema emits the validated result; under dontAsk it must be allowed
+	// or the run dies at the final step. TodoWrite is the model's task tracker
+	// (no repo writes). Neither weakens the read-only guarantee.
+	"StructuredOutput", "TodoWrite",
 }
 
 var disallowedTools = []string{
@@ -332,8 +337,23 @@ func Run(ctx context.Context, opts Options, onEvent func(Event)) (*Result, error
 	// non-empty message — the text can live in result, or only on stderr.
 	if res.IsError {
 		res.ErrMsg = friendlyError(res.RawText, res.Stderr, lastRetryErr, resultSubtype)
+		if d := uniqStrings(res.PermissionDenials); len(d) > 0 {
+			res.ErrMsg += " [blocked tools: " + strings.Join(d, ", ") + "]"
+		}
 	}
 	return res, nil
+}
+
+func uniqStrings(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // friendlyError turns whatever signal we captured into something actionable.
@@ -410,6 +430,10 @@ func describeTool(name string, input json.RawMessage) string {
 		return "searching"
 	case "Glob":
 		return "listing files"
+	case "StructuredOutput":
+		return "writing the review…"
+	case "TodoWrite":
+		return "planning…"
 	default:
 		return "using " + name
 	}
