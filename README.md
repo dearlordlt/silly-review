@@ -19,7 +19,7 @@ It never touches your working tree. You can be mid-work on your own branch and r
 curl -fsSL https://raw.githubusercontent.com/dearlordlt/silly-review/main/setup.sh | sh
 ```
 
-This clones, builds, and installs `silly-review` to `~/.local/bin` (override with `INSTALL_DIR=…`, pick a ref with `BRANCH=…`). Or build from source:
+This clones, builds, and installs `silly-review` to `~/.local/bin` (override with `INSTALL_DIR=…`, pick a ref with `BRANCH=…`). Re-run the same command any time to **update** — or just run `silly-review update`. Or build from source:
 
 ```sh
 git clone https://github.com/dearlordlt/silly-review && cd silly-review
@@ -59,6 +59,7 @@ silly-review --no-tui --branch feat/login --base origin/release-3   # explicit b
 ### Other
 
 ```sh
+silly-review update        # update this install in place to the latest version
 silly-review config        # show saved per-repo base + per-folder style/model
 silly-review --no-fetch    # skip the `git fetch` before listing branches
 ```

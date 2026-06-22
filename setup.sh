@@ -33,13 +33,29 @@ git clone --quiet --depth 1 --branch "$BRANCH" "$REPO_URL" "$tmp/src" \
 info "Building $BIN (this fetches Go deps the first time)…"
 ( cd "$tmp/src" && go build -o "$tmp/$BIN" . ) || die "build failed."
 
-mkdir -p "$INSTALL_DIR" || die "cannot create $INSTALL_DIR"
-if install -m 0755 "$tmp/$BIN" "$INSTALL_DIR/$BIN" 2>/dev/null; then :; else
-  cp "$tmp/$BIN" "$INSTALL_DIR/$BIN" && chmod 0755 "$INSTALL_DIR/$BIN" || die "cannot write to $INSTALL_DIR"
+# Note the currently-installed version (if any) so we can report install vs update.
+old=""
+if [ -x "$INSTALL_DIR/$BIN" ]; then
+  old="$("$INSTALL_DIR/$BIN" --version 2>/dev/null | awk 'NF{print $NF; exit}')"
 fi
+new="$("$tmp/$BIN" --version 2>/dev/null | awk 'NF{print $NF; exit}')"
+[ -n "$new" ] || new="(unknown)"
 
-ver="$("$INSTALL_DIR/$BIN" --version 2>/dev/null || echo "$BIN")"
-info "Installed $ver → $INSTALL_DIR/$BIN"
+mkdir -p "$INSTALL_DIR" || die "cannot create $INSTALL_DIR"
+# Install via temp file + atomic rename: replacing a *running* binary by
+# truncating it fails with ETXTBSY on Linux, but renaming over it is fine.
+dst="$INSTALL_DIR/$BIN"
+tmpdst="$INSTALL_DIR/.$BIN.new.$$"
+( cp "$tmp/$BIN" "$tmpdst" && chmod 0755 "$tmpdst" && mv -f "$tmpdst" "$dst" ) \
+  || { rm -f "$tmpdst" 2>/dev/null || true; die "cannot write to $INSTALL_DIR"; }
+
+if [ -z "$old" ]; then
+  info "Installed silly-review $new → $dst"
+elif [ "$old" = "$new" ]; then
+  info "Already up to date (silly-review $new)."
+else
+  info "Updated silly-review $old → $new"
+fi
 
 # PATH guidance
 case ":${PATH:-}:" in

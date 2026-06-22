@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"syscall"
@@ -54,6 +56,7 @@ func main() {
 	root.Flags().StringVar(&flagOut, "out", "", "with --no-tui, also write the markdown report to this file")
 
 	root.AddCommand(configCmd())
+	root.AddCommand(updateCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "silly-review: "+err.Error())
@@ -280,6 +283,68 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// setupURL is the canonical installer, reused by `silly-review update`.
+const setupURL = "https://raw.githubusercontent.com/dearlordlt/silly-review/main/setup.sh"
+
+// updateCmd re-runs the installer, targeting the directory of the currently
+// running binary so it updates this copy in place.
+func updateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "update",
+		Short: "Update silly-review in place to the latest version",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			exe, err := os.Executable()
+			if err != nil {
+				return err
+			}
+			if resolved, e := filepath.EvalSymlinks(exe); e == nil {
+				exe = resolved
+			}
+			dir := filepath.Dir(exe)
+			ctx := cmd.Context()
+
+			// Download the installer to a temp file and run it only if the
+			// download succeeded. A `curl | sh` pipe hides a download failure —
+			// sh exits 0 on empty stdin — so update could no-op yet report success.
+			script, err := os.CreateTemp("", "silly-review-setup-*.sh")
+			if err != nil {
+				return err
+			}
+			defer os.Remove(script.Name())
+			script.Close()
+
+			var dl *exec.Cmd
+			switch {
+			case haveCmd("curl"):
+				dl = exec.CommandContext(ctx, "curl", "-fsSL", "-o", script.Name(), setupURL)
+			case haveCmd("wget"):
+				dl = exec.CommandContext(ctx, "wget", "-qO", script.Name(), setupURL)
+			default:
+				return fmt.Errorf("need curl or wget to self-update; re-run the install command from the README")
+			}
+			dl.Stderr = os.Stderr
+			if err := dl.Run(); err != nil {
+				return fmt.Errorf("downloading installer from %s: %w", setupURL, err)
+			}
+			if fi, err := os.Stat(script.Name()); err != nil || fi.Size() == 0 {
+				return fmt.Errorf("downloaded installer from %s was empty", setupURL)
+			}
+
+			fmt.Fprintf(os.Stderr, "updating %s (currently %s)…\n", exe, buildVersion())
+			run := exec.CommandContext(ctx, "sh", script.Name())
+			run.Env = append(os.Environ(), "INSTALL_DIR="+dir)
+			run.Stdout, run.Stderr = os.Stdout, os.Stderr
+			return run.Run()
+		},
+	}
+}
+
+func haveCmd(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }
 
 func configCmd() *cobra.Command {
