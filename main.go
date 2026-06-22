@@ -184,16 +184,19 @@ func runHeadless(ctx context.Context, cfg *config.Config, disc *discover.Result,
 
 	if flagJSON {
 		if res.Review == nil {
-			return fmt.Errorf("no structured output returned: %s", res.RawText)
+			return fmt.Errorf("no structured review: %s", firstNonEmpty(res.ErrMsg, res.RawText, res.Stderr, "claude returned no structured output"))
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(res.Review)
 	}
 
-	rr := render.RepoReview{Repo: repo.Name, Review: res.Review, RawText: res.RawText}
-	if res.IsError && res.Review == nil {
-		rr.Err = res.RawText
+	rr := render.RepoReview{Repo: repo.Name, Branch: head, Base: base}
+	if res.IsError {
+		rr.Err = res.ErrMsg
+	} else {
+		rr.Review = res.Review
+		rr.RawText = res.RawText
 	}
 	report := render.FullReport([]render.RepoReview{rr})
 	fmt.Print(report)

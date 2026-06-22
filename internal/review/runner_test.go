@@ -70,6 +70,53 @@ const stubStream = `{"type":"system","subtype":"init","tools":["Read","Grep"],"m
 {"type":"assistant","message":{"content":[{"type":"text","text":"Found an issue."}]}}
 {"type":"result","subtype":"success","is_error":false,"result":"done","total_cost_usd":0.012,"permission_denials":[{"tool_name":"Write"}],"structured_output":{"summary":"ok","verdict":"request_changes","findings":[{"repo":"work","file":"app.go","start_line":3,"severity":"major","title":"No overflow guard","comment":"Add returns int; consider overflow.","code_snippet":"func Add(a, b int) int { return a + b }"}]}}`
 
+// TestRunSurfacesErrors covers the failure shapes that used to silently render
+// as "no findings": an is_error result whose message is only on stderr, and a
+// run that produces no result event at all.
+func TestRunSurfacesErrors(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub uses a shell script")
+	}
+
+	t.Run("is_error with message only on stderr", func(t *testing.T) {
+		stub := writeStubScript(t, `echo "API Error: 529 overloaded" >&2
+echo '{"type":"result","subtype":"error","is_error":true,"result":"","total_cost_usd":0}'`)
+		res, err := Run(context.Background(), Options{Model: "opus", BinPath: stub, PrimaryWorktree: t.TempDir()}, nil)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if !res.IsError {
+			t.Fatal("expected IsError")
+		}
+		if !strings.Contains(res.ErrMsg, "529 overloaded") {
+			t.Fatalf("ErrMsg should fall back to stderr, got %q", res.ErrMsg)
+		}
+	})
+
+	t.Run("no result event, non-zero exit", func(t *testing.T) {
+		stub := writeStubScript(t, `echo "fatal: something broke" >&2
+echo '{"type":"system","subtype":"api_retry","attempt":1,"error":"overloaded"}'
+exit 1`)
+		res, err := Run(context.Background(), Options{Model: "opus", BinPath: stub, PrimaryWorktree: t.TempDir()}, nil)
+		if err == nil {
+			t.Fatalf("expected an error when no result event; res=%+v", res)
+		}
+		if !strings.Contains(err.Error(), "something broke") {
+			t.Fatalf("error should surface stderr, got %q", err.Error())
+		}
+	})
+}
+
+func writeStubScript(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "testclaude")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func writeStub(t *testing.T, stream string) string {
 	t.Helper()
 	dir := t.TempDir()

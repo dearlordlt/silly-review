@@ -113,18 +113,15 @@ func runReviews(ctx context.Context, ws *gitx.Workspace, picks []*repoPick, styl
 			return
 		}
 		rr := render.RepoReview{Repo: name, Branch: head, Base: base}
-		if err != nil {
+		switch {
+		case err != nil:
 			rr.Err = err.Error()
-		} else {
+		case res.IsError:
+			rr.Err = res.ErrMsg // guaranteed non-empty by review.Run
+		default:
 			totalCost += res.CostUSD
 			rr.Review = res.Review
 			rr.RawText = res.RawText
-			if res.IsError && res.Review == nil {
-				rr.Err = res.ErrMsg
-				if rr.Err == "" {
-					rr.Err = res.RawText
-				}
-			}
 		}
 		reviews = append(reviews, rr)
 	}

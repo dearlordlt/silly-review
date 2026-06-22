@@ -119,6 +119,7 @@ type Result struct {
 	RawText           string
 	IsError           bool
 	ErrMsg            string
+	Stderr            string
 	CostUSD           float64
 	PermissionDenials []string
 }
@@ -172,6 +173,7 @@ func Run(ctx context.Context, opts Options, onEvent func(Event)) (*Result, error
 	}
 
 	res := &Result{}
+	sawResult := false
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
 	for sc.Scan() {
@@ -200,6 +202,7 @@ func Run(ctx context.Context, opts Options, onEvent func(Event)) (*Result, error
 				}
 			}
 		case "result":
+			sawResult = true
 			res.IsError = sl.IsError
 			res.RawText = sl.Result
 			res.CostUSD = sl.TotalCostUSD
@@ -220,17 +223,37 @@ func Run(ctx context.Context, opts Options, onEvent func(Event)) (*Result, error
 	if ctx.Err() != nil {
 		return res, ctx.Err()
 	}
-	if waitErr != nil && res.Review == nil && res.RawText == "" {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = waitErr.Error()
-		}
+	res.Stderr = strings.TrimSpace(stderr.String())
+
+	// claude never emitted a result event (crashed, killed, or died before the
+	// API call). Surface stderr/exit so the user sees the real reason instead of
+	// a silent "no findings".
+	if !sawResult {
+		msg := firstNonEmpty(res.Stderr, errString(waitErr), "claude exited without producing a review")
 		return res, fmt.Errorf("claude failed: %s", msg)
 	}
-	if res.IsError && res.Review == nil {
-		res.ErrMsg = res.RawText
+	// A result arrived but flagged an error (e.g. auth/API error). Guarantee a
+	// non-empty message — the text can live in result, or only on stderr.
+	if res.IsError {
+		res.ErrMsg = firstNonEmpty(res.RawText, res.Stderr, "claude reported an error (run with --debug for detail)")
 	}
 	return res, nil
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func describeTool(name string, input json.RawMessage) string {
