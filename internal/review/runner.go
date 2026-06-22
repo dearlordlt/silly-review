@@ -320,17 +320,18 @@ func Run(ctx context.Context, opts Options, onEvent func(Event)) (*Result, error
 		}
 	}
 
+	scanErr := sc.Err() // e.g. a >16MB or garbled line — don't let it fail silently
 	waitErr := cmd.Wait()
 	if ctx.Err() != nil {
 		return res, ctx.Err()
 	}
 	res.Stderr = strings.TrimSpace(stderr.String())
 
-	// claude never emitted a result event (crashed, killed, or died before the
-	// API call). Surface stderr/exit so the user sees the real reason instead of
-	// a silent "no findings".
+	// claude never emitted a result event (crashed, killed, scanner error, or
+	// died before the API call). Surface the real reason instead of a silent
+	// "no findings".
 	if !sawResult {
-		msg := firstNonEmpty(res.Stderr, errString(waitErr), "claude exited without producing a review")
+		msg := firstNonEmpty(res.Stderr, errString(scanErr), errString(waitErr), "claude exited without producing a review")
 		return res, fmt.Errorf("claude failed: %s", msg)
 	}
 	// A result arrived but flagged an error (e.g. auth/API error). Guarantee a

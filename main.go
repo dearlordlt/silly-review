@@ -239,6 +239,12 @@ func runHeadless(ctx context.Context, cfg *config.Config, disc *discover.Result,
 		}
 		fmt.Fprintf(os.Stderr, "wrote %s\n", flagOut)
 	}
+	// Reflect a failed review in the exit code so CI/scripting can tell a
+	// transient/auth/overload failure apart from a clean pass (the report still
+	// printed above for the human).
+	if res.IsError {
+		return fmt.Errorf("review failed: %s", res.ErrMsg)
+	}
 	return nil
 }
 

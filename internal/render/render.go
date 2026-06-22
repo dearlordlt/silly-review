@@ -134,11 +134,6 @@ func FullReport(reviews []RepoReview) string {
 	return b.String()
 }
 
-// StdoutReport is the plain-text report for --no-tui / piped output.
-func StdoutReport(reviews []RepoReview) string {
-	return FullReport(reviews)
-}
-
 // ProseNotes returns the model's free-form narrative when it's materially richer
 // than the structured summary. With --json-schema the summary field is short, so
 // the detailed assessment often lands in the result text — which is exactly the
