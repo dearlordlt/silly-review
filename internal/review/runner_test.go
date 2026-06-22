@@ -93,6 +93,22 @@ echo '{"type":"result","subtype":"error","is_error":true,"result":"","total_cost
 		}
 	})
 
+	t.Run("overloaded retries then empty error result", func(t *testing.T) {
+		stub := writeStubScript(t, `echo '{"type":"system","subtype":"api_retry","attempt":1,"error":"overloaded_error"}'
+echo '{"type":"system","subtype":"api_retry","attempt":2,"error":"overloaded_error"}'
+echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"","total_cost_usd":0}'`)
+		res, err := Run(context.Background(), Options{Model: "opus", BinPath: stub, PrimaryWorktree: t.TempDir()}, nil)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if !res.IsError {
+			t.Fatal("expected IsError")
+		}
+		if !strings.Contains(strings.ToLower(res.ErrMsg), "overload") {
+			t.Fatalf("ErrMsg should name the overload from api_retry, got %q", res.ErrMsg)
+		}
+	})
+
 	t.Run("no result event, non-zero exit", func(t *testing.T) {
 		stub := writeStubScript(t, `echo "fatal: something broke" >&2
 echo '{"type":"system","subtype":"api_retry","attempt":1,"error":"overloaded"}'

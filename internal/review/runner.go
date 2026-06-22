@@ -181,6 +181,7 @@ func Run(ctx context.Context, opts Options, onEvent func(Event)) (*Result, error
 
 	res := &Result{}
 	sawResult := false
+	var lastRetryErr, resultSubtype string
 	var thinkBuf strings.Builder
 	lastThink := 0
 	sc := bufio.NewScanner(stdout)
@@ -208,6 +209,7 @@ func Run(ctx context.Context, opts Options, onEvent func(Event)) (*Result, error
 				if reason == "" {
 					reason = "transient error"
 				}
+				lastRetryErr = sl.Error // remember the reason in case the run ultimately fails
 				onEvent(Event{Kind: EvtRetry, Attempt: sl.Attempt, Text: fmt.Sprintf("retrying (%s), attempt %d", reason, sl.Attempt)})
 			}
 		case "assistant":
@@ -226,6 +228,7 @@ func Run(ctx context.Context, opts Options, onEvent func(Event)) (*Result, error
 			res.IsError = sl.IsError
 			res.RawText = sl.Result
 			res.CostUSD = sl.TotalCostUSD
+			resultSubtype = sl.Subtype
 			for _, d := range sl.PermissionDenials {
 				res.PermissionDenials = append(res.PermissionDenials, d.ToolName)
 			}
@@ -255,9 +258,46 @@ func Run(ctx context.Context, opts Options, onEvent func(Event)) (*Result, error
 	// A result arrived but flagged an error (e.g. auth/API error). Guarantee a
 	// non-empty message — the text can live in result, or only on stderr.
 	if res.IsError {
-		res.ErrMsg = firstNonEmpty(res.RawText, res.Stderr, "claude reported an error (run with --debug for detail)")
+		res.ErrMsg = friendlyError(res.RawText, res.Stderr, lastRetryErr, resultSubtype)
 	}
 	return res, nil
+}
+
+// friendlyError turns whatever signal we captured into something actionable.
+// claude often flags an error with an empty result body, leaving the real
+// reason in the api_retry events or the result subtype.
+func friendlyError(rawText, stderr, retryReason, subtype string) string {
+	if s := strings.TrimSpace(rawText); s != "" {
+		return s
+	}
+	if r := classifyRetry(retryReason); r != "" {
+		return r
+	}
+	if s := strings.TrimSpace(stderr); s != "" {
+		return s
+	}
+	if subtype != "" && subtype != "success" {
+		return "claude ended with: " + subtype
+	}
+	return "claude reported an error with no detail — likely a transient API issue, try again"
+}
+
+func classifyRetry(reason string) string {
+	r := strings.ToLower(reason)
+	switch {
+	case r == "":
+		return ""
+	case strings.Contains(r, "overload"):
+		return "Claude's API is overloaded (retries exhausted) — try again in a bit"
+	case strings.Contains(r, "rate"):
+		return "rate limited (retries exhausted) — try again shortly"
+	case strings.Contains(r, "auth"):
+		return "authentication failed — run `claude` and sign in, then retry"
+	case strings.Contains(r, "529"), strings.Contains(r, "503"), strings.Contains(r, "overcapacity"):
+		return "Claude's API is temporarily unavailable — try again in a bit"
+	default:
+		return "API error after retries: " + reason
+	}
 }
 
 func errString(err error) string {
