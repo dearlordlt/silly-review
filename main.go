@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"syscall"
@@ -285,8 +286,11 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// setupURL is the canonical installer, reused by `silly-review update`.
-const setupURL = "https://raw.githubusercontent.com/dearlordlt/silly-review/main/setup.sh"
+// setup script URLs, reused by `silly-review update`.
+const (
+	setupURL    = "https://raw.githubusercontent.com/dearlordlt/silly-review/main/setup.sh"
+	setupPS1URL = "https://raw.githubusercontent.com/dearlordlt/silly-review/main/setup.ps1"
+)
 
 // updateCmd re-runs the installer, targeting the directory of the currently
 // running binary so it updates this copy in place.
@@ -305,6 +309,18 @@ func updateCmd() *cobra.Command {
 			}
 			dir := filepath.Dir(exe)
 			ctx := cmd.Context()
+			fmt.Fprintf(os.Stderr, "updating %s (currently %s)…\n", exe, buildVersion())
+
+			if runtime.GOOS == "windows" {
+				// Download to a temp file (Stop on failure) then run it; INSTALL_DIR
+				// is passed via env so the running binary's dir is updated in place.
+				ps := "$ErrorActionPreference='Stop'; $f=Join-Path $env:TEMP ('sr-setup-'+[guid]::NewGuid().ToString('N')+'.ps1'); " +
+					"Invoke-WebRequest -UseBasicParsing '" + setupPS1URL + "' -OutFile $f; & $f; Remove-Item $f -Force -ErrorAction SilentlyContinue"
+				run := exec.CommandContext(ctx, "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps)
+				run.Env = append(os.Environ(), "INSTALL_DIR="+dir)
+				run.Stdout, run.Stderr = os.Stdout, os.Stderr
+				return run.Run()
+			}
 
 			// Download the installer to a temp file and run it only if the
 			// download succeeded. A `curl | sh` pipe hides a download failure —
@@ -333,7 +349,6 @@ func updateCmd() *cobra.Command {
 				return fmt.Errorf("downloaded installer from %s was empty", setupURL)
 			}
 
-			fmt.Fprintf(os.Stderr, "updating %s (currently %s)…\n", exe, buildVersion())
 			run := exec.CommandContext(ctx, "sh", script.Name())
 			run.Env = append(os.Environ(), "INSTALL_DIR="+dir)
 			run.Stdout, run.Stderr = os.Stdout, os.Stderr
