@@ -171,13 +171,16 @@ func runHeadless(ctx context.Context, cfg *config.Config, disc *discover.Result,
 	model := firstNonEmpty(flagModel, cfg.Folder(repo.Path).Model, config.DefaultModel)
 
 	fmt.Fprintf(os.Stderr, "reviewing %s vs %s (%s, %s)…\n", head, base, model, style.Key)
+	prog := newProgress(os.Stderr)
+	prog.start()
 	res, err := review.Run(ctx, review.Options{
 		Model:           model,
 		System:          review.SystemPrompt(style),
 		Prompt:          review.BuildPrompt(rc, nil),
 		PrimaryWorktree: wt.Path,
 		BinPath:         bin,
-	}, nil)
+	}, prog.event)
+	prog.stop()
 	if err != nil {
 		return err
 	}
