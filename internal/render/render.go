@@ -105,6 +105,9 @@ func FullReport(reviews []RepoReview) string {
 		if s := strings.TrimSpace(rr.Review.Summary); s != "" {
 			b.WriteString(s + "\n\n")
 		}
+		if n := ProseNotes(rr); n != "" {
+			b.WriteString("**Reviewer's notes**\n\n" + n + "\n\n")
+		}
 		findings := append([]review.Finding(nil), rr.Review.Findings...)
 		for i := range findings {
 			if findings[i].Repo == "" {
@@ -134,4 +137,20 @@ func FullReport(reviews []RepoReview) string {
 // StdoutReport is the plain-text report for --no-tui / piped output.
 func StdoutReport(reviews []RepoReview) string {
 	return FullReport(reviews)
+}
+
+// ProseNotes returns the model's free-form narrative when it's materially richer
+// than the structured summary. With --json-schema the summary field is short, so
+// the detailed assessment often lands in the result text — which is exactly the
+// "proof of work" worth showing on a clean review.
+func ProseNotes(rr RepoReview) string {
+	notes := strings.TrimSpace(rr.RawText)
+	if notes == "" || rr.Review == nil {
+		return ""
+	}
+	sum := strings.TrimSpace(rr.Review.Summary)
+	if notes == sum || len(notes) < len(sum)+120 {
+		return ""
+	}
+	return notes
 }

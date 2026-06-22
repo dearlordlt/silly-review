@@ -28,9 +28,10 @@ func TestEmptyStateTellsTheTruth(t *testing.T) {
 			want: "no changes between origin/feat and origin/main",
 		},
 		{
-			name: "genuinely clean",
-			rr:   render.RepoReview{Repo: "svc", Review: &review.Review{Verdict: "approve"}},
-			want: "no findings",
+			name:   "clean review shows its assessment",
+			rr:     render.RepoReview{Repo: "svc", Review: &review.Review{Verdict: "approve", Summary: "Reviewed all 22 files; the read-only invariant holds and is well tested."}},
+			want:   "read-only invariant holds",
+			reject: "🎉",
 		},
 		{
 			name:   "prose only (no structured output)",

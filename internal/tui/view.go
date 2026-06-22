@@ -244,11 +244,11 @@ func (m *Model) viewResults() string {
 
 	if len(fs) == 0 {
 		// Only the *filter* emptied the list when there are findings overall;
-		// if there are none at all, always show the per-repo diagnostics.
+		// if there are none at all, always show the per-repo assessment.
 		if len(m.flat) > 0 && m.sevFilter != "" {
 			b.WriteString(dimStyle.Render(fmt.Sprintf("No %s findings. Press f to change filter.\n", m.sevFilter)))
 		} else {
-			b.WriteString(m.emptyStateBody())
+			b.WriteString(truncateToLines(m.emptyStateBody(), h-6, "(Y copies the full write-up)"))
 		}
 		b.WriteString(m.statusLine())
 		b.WriteString("\n\n" + helpStyle.Render("Y copy full review · f filter · q quit"))
@@ -296,12 +296,16 @@ func (m *Model) viewResults() string {
 	return b.String()
 }
 
-// emptyStateBody explains *why* there are no findings: per repo it was a
-// failure, a no-op (empty diff), or a genuinely clean review.
+// emptyStateBody renders what happened when there are no line-level findings:
+// a failure, a no-op (empty diff), or — crucially — the reviewer's actual
+// assessment (verdict + summary + narrative) so a clean review proves its work
+// instead of just celebrating emptiness.
 func (m *Model) emptyStateBody() string {
 	if len(m.reviews) == 0 {
 		return okStyle.Render("No findings. 🎉\n")
 	}
+	w, _ := m.dims()
+	wrap := lipgloss.NewStyle().Width(min(w-2, 100))
 	var b strings.Builder
 	authHint := false
 	for _, rr := range m.reviews {
@@ -315,10 +319,24 @@ func (m *Model) emptyStateBody() string {
 			}
 		case rr.NoChanges:
 			b.WriteString(dimStyle.Render(fmt.Sprintf("• %s — no changes between %s and %s (nothing to review)", rr.Repo, rr.Branch, rr.Base)) + "\n")
-		case rr.Review == nil && strings.TrimSpace(rr.RawText) != "":
-			b.WriteString(dimStyle.Render(fmt.Sprintf("• %s — review returned prose, no structured findings (press Y to copy)", rr.Repo)) + "\n")
+		case rr.Review != nil:
+			head := okStyle.Render("✓ " + rr.Repo)
+			if v := rr.Review.Verdict; v != "" {
+				head += dimStyle.Render(" — " + v + ", no blocking findings")
+			}
+			b.WriteString(head + "\n\n")
+			if s := strings.TrimSpace(rr.Review.Summary); s != "" {
+				b.WriteString(wrap.Render(s) + "\n")
+			}
+			if n := render.ProseNotes(rr); n != "" {
+				b.WriteString("\n" + wrap.Render(n) + "\n")
+			}
+			b.WriteString("\n" + dimStyle.Render("(Y copies the full write-up. For line-level notes, re-run with the Thorough style.)") + "\n")
+		case strings.TrimSpace(rr.RawText) != "":
+			b.WriteString(dimStyle.Render(fmt.Sprintf("• %s — assessment (no structured findings):", rr.Repo)) + "\n\n")
+			b.WriteString(wrap.Render(strings.TrimSpace(rr.RawText)) + "\n")
 		default:
-			b.WriteString(okStyle.Render(fmt.Sprintf("✓ %s — no findings 🎉", rr.Repo)) + "\n")
+			b.WriteString(okStyle.Render(fmt.Sprintf("✓ %s — no findings", rr.Repo)) + "\n")
 		}
 	}
 	if authHint {
@@ -364,7 +382,7 @@ func (m *Model) renderDetail(f review.Finding, w, h int) string {
 	if s := strings.TrimSpace(f.Suggestion); s != "" {
 		b.WriteString(selStyle.Render("suggestion: ") + wrap.Render(s) + "\n")
 	}
-	content := truncateToLines(b.String(), h-2)
+	content := truncateToLines(b.String(), h-2, "(press y to copy this comment)")
 	return boxStyle.Width(w - 2).Render(content)
 }
 
@@ -417,7 +435,7 @@ func truncate(s string, w int) string {
 	return string(r) + "…"
 }
 
-func truncateToLines(s string, n int) string {
+func truncateToLines(s string, n int, hint string) string {
 	if n < 1 {
 		n = 1
 	}
@@ -426,6 +444,6 @@ func truncateToLines(s string, n int) string {
 		return strings.Join(lines, "\n")
 	}
 	lines = lines[:n]
-	lines[n-1] = dimStyle.Render("… (press y to copy the full comment)")
+	lines[n-1] = dimStyle.Render("… " + hint)
 	return strings.Join(lines, "\n")
 }

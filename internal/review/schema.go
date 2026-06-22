@@ -50,7 +50,7 @@ const SchemaJSON = `{
   "additionalProperties": false,
   "required": ["summary", "verdict", "findings"],
   "properties": {
-    "summary": { "type": "string", "description": "2-4 sentence overall assessment in a senior engineer's voice" },
+    "summary": { "type": "string", "description": "A substantive overall assessment in a senior engineer's voice (roughly 4-8 sentences): what you examined, what is solid, and any concerns. Write this even when there are no blocking findings, so the review visibly did real work." },
     "verdict": { "type": "string", "enum": ["approve", "approve_with_nits", "request_changes", "block"] },
     "findings": {
       "type": "array",
