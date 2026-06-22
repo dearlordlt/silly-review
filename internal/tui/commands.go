@@ -102,7 +102,7 @@ func runReviews(ctx context.Context, ws *gitx.Workspace, picks []*repoPick, styl
 			OtherWorktrees:  otherPaths,
 			BinPath:         binPath,
 		}
-		res, err := review.Run(ctx, opts, func(e review.Event) {
+		res, err := review.RunWithResume(ctx, opts, func(e review.Event) {
 			switch e.Kind {
 			case review.EvtRetry:
 				send(retryMsg{text: e.Text})

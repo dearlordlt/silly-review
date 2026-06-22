@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildArgsReadOnly(t *testing.T) {
@@ -119,6 +120,50 @@ exit 1`)
 		}
 		if !strings.Contains(err.Error(), "something broke") {
 			t.Fatalf("error should surface stderr, got %q", err.Error())
+		}
+	})
+}
+
+// TestRunWithResume: a transient failure with a session id is resumed (reusing
+// the session), and the resumed attempt's success is returned.
+func TestRunWithResume(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub uses a shell script")
+	}
+	old := resumeBackoffs
+	resumeBackoffs = []time.Duration{0, 0}
+	defer func() { resumeBackoffs = old }()
+
+	t.Run("transient error resumes to success", func(t *testing.T) {
+		// First call (no --resume): emit init + overload + error. Resume call
+		// (has --resume): emit a successful structured result.
+		stub := writeStubScript(t, `echo '{"type":"system","subtype":"init","session_id":"sess-abc"}'
+for a in "$@"; do
+  if [ "$a" = "--resume" ]; then
+    echo '{"type":"result","is_error":false,"result":"ok","total_cost_usd":0.4,"structured_output":{"summary":"done","verdict":"approve","findings":[]}}'
+    exit 0
+  fi
+done
+echo '{"type":"system","subtype":"api_retry","attempt":1,"error":"overloaded_error"}'
+echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"","total_cost_usd":0.1}'`)
+		res, err := RunWithResume(context.Background(), Options{Model: "opus", BinPath: stub, PrimaryWorktree: t.TempDir()}, nil)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if res.Review == nil || res.Review.Verdict != "approve" {
+			t.Fatalf("expected resumed success, got IsError=%v review=%+v errmsg=%q", res.IsError, res.Review, res.ErrMsg)
+		}
+	})
+
+	t.Run("auth error is not resumed", func(t *testing.T) {
+		stub := writeStubScript(t, `echo '{"type":"system","subtype":"init","session_id":"sess-xyz"}'
+echo '{"type":"result","is_error":true,"result":"Failed to authenticate. API Error: 401"}'`)
+		res, err := RunWithResume(context.Background(), Options{Model: "opus", BinPath: stub, PrimaryWorktree: t.TempDir()}, nil)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if !res.IsError || res.Review != nil {
+			t.Fatalf("auth error should remain a failure, got %+v", res)
 		}
 	})
 }

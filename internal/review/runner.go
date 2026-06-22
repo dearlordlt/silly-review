@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Options configures a single claude review invocation.
@@ -19,6 +20,7 @@ type Options struct {
 	PrimaryWorktree string // cwd for the subprocess
 	OtherWorktrees  []string
 	BinPath         string // claude binary; defaults to "claude"
+	ResumeSessionID string // when set, resume this session instead of starting fresh
 }
 
 // allowedTools / disallowedTools enforce the read-only sandbox. Kept as package
@@ -93,7 +95,66 @@ func BuildArgs(opts Options) []string {
 	for _, d := range opts.OtherWorktrees {
 		args = append(args, "--add-dir", d)
 	}
+	// Resume reuses the prior session (all file reads already in context); the
+	// same cwd is required for claude to find the session on disk.
+	if opts.ResumeSessionID != "" {
+		args = append(args, "--resume", opts.ResumeSessionID)
+	}
 	return args
+}
+
+// ResumePrompt nudges a resumed session to emit the review from existing
+// context rather than starting the read pass over.
+const ResumePrompt = "The previous attempt was interrupted by an API error before you produced the review. Using everything you have already read, output the review now per the JSON schema — do not start the analysis over."
+
+// resumeBackoffs is the wait before each resume attempt (var so tests can zero it).
+var resumeBackoffs = []time.Duration{6 * time.Second, 18 * time.Second}
+
+// RunWithResume runs a review and, if it fails transiently (overload, 5xx, a
+// mid-generation drop) with a captured session id, resumes that session instead
+// of redoing the whole read pass. Auth failures are not resumed (resuming won't
+// fix them). It never resumes more than len(resumeBackoffs) times.
+func RunWithResume(ctx context.Context, opts Options, onEvent func(Event)) (*Result, error) {
+	if onEvent == nil {
+		onEvent = func(Event) {}
+	}
+	res, err := Run(ctx, opts, onEvent)
+	for attempt := 0; attempt < len(resumeBackoffs); attempt++ {
+		if !resumable(res, err) {
+			break
+		}
+		wait := resumeBackoffs[attempt]
+		onEvent(Event{Kind: EvtRetry, Text: fmt.Sprintf("API error — resuming where it left off in %s (attempt %d)…", fmtWait(wait), attempt+1)})
+		select {
+		case <-ctx.Done():
+			return res, ctx.Err()
+		case <-time.After(wait):
+		}
+		ropts := opts
+		ropts.ResumeSessionID = res.SessionID
+		ropts.Prompt = ResumePrompt
+		res, err = Run(ctx, ropts, onEvent)
+	}
+	return res, err
+}
+
+// resumable reports whether a failed run is worth resuming.
+func resumable(res *Result, err error) bool {
+	if res == nil || res.SessionID == "" {
+		return false
+	}
+	if !res.IsError && err == nil {
+		return false // succeeded
+	}
+	blob := strings.ToLower(res.ErrMsg + " " + errString(err))
+	if strings.Contains(blob, "auth") || strings.Contains(blob, "401") || strings.Contains(blob, "sign in") {
+		return false // resuming won't fix authentication
+	}
+	return true
+}
+
+func fmtWait(d time.Duration) string {
+	return fmt.Sprintf("%ds", int(d.Seconds()))
 }
 
 // EventKind tags a progress event.
@@ -121,15 +182,17 @@ type Result struct {
 	IsError           bool
 	ErrMsg            string
 	Stderr            string
+	SessionID         string // captured from the init event; enables resume
 	CostUSD           float64
 	PermissionDenials []string
 }
 
 // streamLine is the union of stream-json event shapes we care about.
 type streamLine struct {
-	Type    string `json:"type"`
-	Subtype string `json:"subtype"`
-	Message struct {
+	Type      string `json:"type"`
+	Subtype   string `json:"subtype"`
+	SessionID string `json:"session_id"`
+	Message   struct {
 		Content []struct {
 			Type  string          `json:"type"`
 			Text  string          `json:"text"`
@@ -204,6 +267,9 @@ func Run(ctx context.Context, opts Options, onEvent func(Event)) (*Result, error
 				}
 			}
 		case "system":
+			if sl.Subtype == "init" && sl.SessionID != "" {
+				res.SessionID = sl.SessionID
+			}
 			if sl.Subtype == "api_retry" {
 				reason := sl.Error
 				if reason == "" {
@@ -229,6 +295,9 @@ func Run(ctx context.Context, opts Options, onEvent func(Event)) (*Result, error
 			res.RawText = sl.Result
 			res.CostUSD = sl.TotalCostUSD
 			resultSubtype = sl.Subtype
+			if res.SessionID == "" && sl.SessionID != "" {
+				res.SessionID = sl.SessionID
+			}
 			for _, d := range sl.PermissionDenials {
 				res.PermissionDenials = append(res.PermissionDenials, d.ToolName)
 			}

@@ -203,7 +203,7 @@ func runHeadless(ctx context.Context, cfg *config.Config, disc *discover.Result,
 	fmt.Fprintf(os.Stderr, "reviewing %s vs %s (%s, %s)…\n", head, base, model, style.Key)
 	prog := newProgress(os.Stderr)
 	prog.start()
-	res, err := review.Run(ctx, review.Options{
+	res, err := review.RunWithResume(ctx, review.Options{
 		Model:           model,
 		System:          review.SystemPrompt(style),
 		Prompt:          review.BuildPrompt(rc, nil),
