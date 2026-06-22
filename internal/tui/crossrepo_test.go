@@ -75,6 +75,25 @@ func TestCrossRepoNoMatchSkip(t *testing.T) {
 	}
 }
 
+// TestCrossRepoYesBranchEqualsBase: pressing Yes on a matched branch that equals
+// the repo's base must route to manual *and keep* the explanatory warning.
+func TestCrossRepoYesBranchEqualsBase(t *testing.T) {
+	m, be := twoRepoAtMatch(t, []gitx.Branch{
+		{Name: "feat/x", Ref: "origin/main", Author: "ada", Subject: "x"}, // Ref == backend's default base
+		{Name: "main", Ref: "origin/main"},
+	})
+	m.keyMatch(runeKey("y"))
+	if m.screen != scBranchSelect {
+		t.Fatalf("expected routing to manual branch select, got screen %d", m.screen)
+	}
+	if !strings.Contains(m.statusMsg, "nothing to diff") {
+		t.Fatalf("base-collision warning should survive, got %q", m.statusMsg)
+	}
+	if be.decided || be.dropped {
+		t.Fatalf("backend should await a manual pick, got %+v", be)
+	}
+}
+
 func TestViewMatchRendersAllCases(t *testing.T) {
 	m := testModel(t)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})

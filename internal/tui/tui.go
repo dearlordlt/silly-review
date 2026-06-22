@@ -666,7 +666,9 @@ func (m *Model) matchSkip() (tea.Model, tea.Cmd) {
 func (m *Model) matchManual() (tea.Model, tea.Cmd) {
 	p := m.picks[m.cur]
 	m.loadPickIntoView(p)
-	m.statusMsg = ""
+	// Note: don't clear statusMsg here — presentMatch already cleared it on entry
+	// to the match screen, and matchYes sets an explanatory warning before routing
+	// here that must survive to the branch picker.
 	if base, ok := m.cfg.RepoBase(p.repo.Path); ok {
 		p.base = base
 		m.screen = scBranchSelect
