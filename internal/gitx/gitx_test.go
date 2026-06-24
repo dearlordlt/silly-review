@@ -105,6 +105,84 @@ func TestDiffUnrelatedHistories(t *testing.T) {
 	}
 }
 
+// TestLocalBranchesAndMerge covers reviewing unpushed local work: a local branch
+// with no remote counterpart shows up (flagged Local), and merging puts it ahead
+// of remotes while dropping local branches already on the remote.
+func TestLocalBranchesAndMerge(t *testing.T) {
+	ctx, repo := fixture(t)
+	// On a fresh feature branch that is NOT pushed.
+	mustGit(t, repo.Path, "checkout", "-q", "-b", "krea2")
+	writeFile(t, repo.Path, "k.go", "package k\n")
+	mustGit(t, repo.Path, "add", ".")
+	mustGit(t, repo.Path, "commit", "-qm", "local work")
+
+	local, err := LocalBranches(ctx, repo.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var krea2 *Branch
+	for i := range local {
+		if local[i].Name == "krea2" {
+			krea2 = &local[i]
+		}
+	}
+	if krea2 == nil || !krea2.Local || krea2.Ref != "krea2" {
+		t.Fatalf("expected local krea2 with Ref=krea2, got %+v", local)
+	}
+
+	remote, _ := RemoteBranches(ctx, repo.Path, repo.Remote) // main, feature
+	merged := MergeBranchLists(local, remote)
+	names := map[string]bool{}
+	localKept := false
+	for _, b := range merged {
+		names[b.Name] = true
+		if b.Name == "krea2" && b.Local {
+			localKept = true
+		}
+		// local "main"/"feature" (already on the remote) must be dropped, leaving
+		// only the remote copies — so no merged entry is a local main/feature.
+		if (b.Name == "main" || b.Name == "feature") && b.Local {
+			t.Fatalf("local %s should have been dropped (it's on the remote)", b.Name)
+		}
+	}
+	if !localKept || !names["main"] || !names["feature"] {
+		t.Fatalf("merged set wrong: %v", names)
+	}
+}
+
+// TestWorktreeOfCheckedOutLocalBranch: reviewing the branch you're currently on
+// (unpushed) must work and leave your working tree untouched.
+func TestWorktreeOfCheckedOutLocalBranch(t *testing.T) {
+	ctx, repo := fixture(t)
+	mustGit(t, repo.Path, "checkout", "-q", "-b", "krea2")
+	writeFile(t, repo.Path, "k.go", "package k\n")
+	mustGit(t, repo.Path, "add", ".")
+	mustGit(t, repo.Path, "commit", "-qm", "local work")
+
+	headBefore := gitOut(t, repo.Path, "rev-parse", "HEAD")
+	branchBefore := gitOut(t, repo.Path, "rev-parse", "--abbrev-ref", "HEAD") // krea2
+
+	ws, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err := ws.Add(ctx, repo, "krea2") // bare local-branch ref, currently checked out
+	if err != nil {
+		t.Fatalf("worktree of checked-out local branch failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(wt.Path, "k.go")); err != nil {
+		t.Fatalf("worktree missing local-branch content: %v", err)
+	}
+	ws.Cleanup()
+
+	if got := gitOut(t, repo.Path, "rev-parse", "--abbrev-ref", "HEAD"); got != branchBefore {
+		t.Fatalf("current branch changed: %s -> %s", branchBefore, got)
+	}
+	if got := gitOut(t, repo.Path, "rev-parse", "HEAD"); got != headBefore {
+		t.Fatalf("HEAD changed: %s -> %s", headBefore, got)
+	}
+}
+
 // TestWorktreeLeavesTreeUntouched is the central safety invariant: creating and
 // removing a disposable worktree must not change the user's HEAD or status.
 func TestWorktreeLeavesTreeUntouched(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,15 +25,16 @@ type Repo struct {
 	Remote string // remote to review against, normally "origin"
 }
 
-// Branch is a remote branch with the metadata shown in the picker.
+// Branch is a branch with the metadata shown in the picker.
 type Branch struct {
 	Name    string    // short name without remote prefix, e.g. "feat/login"
-	Ref     string    // full remote ref, e.g. "origin/feat/login"
+	Ref     string    // ref to review: "origin/feat/login" (remote) or "feat/login" (local)
 	SHA     string    // abbreviated commit hash
 	Date    time.Time // committer date
 	DateRel string    // git's relative date, e.g. "3 hours ago"
 	Author  string
 	Subject string
+	Local   bool // a local branch (e.g. unpushed work), not a remote one
 }
 
 // FileChange is one entry from `git diff --name-status`.
@@ -148,6 +150,58 @@ func RemoteBranches(ctx context.Context, repoPath, remote string) ([]Branch, err
 		})
 	}
 	return branches, nil
+}
+
+// LocalBranches lists local branches (refs/heads), newest commit first, with
+// Local=true and Ref set to the bare branch name. Callers filter out ones that
+// are already on the remote (see MergeBranchLists).
+func LocalBranches(ctx context.Context, repoPath string) ([]Branch, error) {
+	const fmtStr = "%(refname:short)%09%(objectname:short)%09%(committerdate:iso8601-strict)%09%(committerdate:relative)%09%(authorname)%09%(contents:subject)"
+	out, err := run(ctx, repoPath, "for-each-ref", "--sort=-committerdate", "--format="+fmtStr, "refs/heads")
+	if err != nil {
+		return nil, err
+	}
+	var branches []Branch
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 6)
+		if len(parts) < 6 {
+			continue
+		}
+		t, _ := time.Parse(time.RFC3339, parts[2])
+		branches = append(branches, Branch{
+			Name:    parts[0],
+			Ref:     parts[0], // local branches are reviewed by bare name
+			SHA:     parts[1],
+			Date:    t,
+			DateRel: parts[3],
+			Author:  parts[4],
+			Subject: parts[5],
+			Local:   true,
+		})
+	}
+	return branches, nil
+}
+
+// MergeBranchLists returns the unpushed local branches (those without a
+// same-named remote branch) followed by the remote branches, newest commit
+// first — so reviewing your own work before pushing is a first-class option.
+func MergeBranchLists(local, remote []Branch) []Branch {
+	rset := make(map[string]bool, len(remote))
+	for _, b := range remote {
+		rset[b.Name] = true
+	}
+	out := make([]Branch, 0, len(local)+len(remote))
+	for _, b := range local {
+		if !rset[b.Name] { // skip local branches already represented on the remote
+			out = append(out, b)
+		}
+	}
+	out = append(out, remote...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Date.After(out[j].Date) })
+	return out
 }
 
 // DefaultBranch returns the remote's default branch ref (e.g. "origin/main").

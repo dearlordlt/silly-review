@@ -130,7 +130,7 @@ func (m *Model) viewBranchSelect() string {
 	var sub string
 	switch {
 	case len(m.picks) <= 1:
-		sub = fmt.Sprintf("%s  ·  diffed against %s  ·  remote branches, newest first", p.repo.Name, p.base)
+		sub = fmt.Sprintf("%s  ·  diffed against %s  ·  your unpushed branches + remote, newest first", p.repo.Name, p.base)
 	case m.anchorBranchName == "":
 		// The anchor repo — its branch name drives matching in the others.
 		sub = fmt.Sprintf("repo 1/%d · %s  ·  base %s  ·  this branch's name is matched against the other repos next", len(m.picks), p.repo.Name, p.base)
@@ -146,8 +146,12 @@ func (m *Model) viewBranchSelect() string {
 			cursor = cursorStyle.Render("▸ ")
 			name = cursorStyle.Render(name)
 		}
+		tag := ""
+		if br.Local {
+			tag = selStyle.Render(" (local, unpushed)")
+		}
 		meta := dimStyle.Render(fmt.Sprintf("%s · %s", br.Author, br.DateRel))
-		line := fmt.Sprintf("%s%s  %s  %s", cursor, name, truncate(br.Subject, w/2), meta)
+		line := fmt.Sprintf("%s%s%s  %s  %s", cursor, name, tag, truncate(br.Subject, w/2), meta)
 		b.WriteString(truncate(line, w) + "\n")
 	}
 	if m.statusMsg != "" {
@@ -227,8 +231,12 @@ func (m *Model) viewMatch() string {
 		if m.matched.Author != m.anchorAuthor {
 			author = warn.Render(author)
 		}
+		ltag := ""
+		if m.matched.Local {
+			ltag = selStyle.Render(" (local, unpushed)")
+		}
 		meta := dimStyle.Render(author + " · " + m.matched.DateRel)
-		row := fmt.Sprintf("  %s  %s  %s", m.matched.Name, truncate(m.matched.Subject, w/2), meta)
+		row := fmt.Sprintf("  %s%s  %s  %s", m.matched.Name, ltag, truncate(m.matched.Subject, w/2), meta)
 		b.WriteString(truncate(row, w) + "\n")
 		if p.base != "" {
 			b.WriteString(dimStyle.Render("  will be diffed against "+p.base) + "\n")
