@@ -15,6 +15,7 @@ import (
 	"silly-review/internal/config"
 	"silly-review/internal/discover"
 	"silly-review/internal/gitx"
+	"silly-review/internal/history"
 	"silly-review/internal/render"
 	"silly-review/internal/review"
 )
@@ -27,6 +28,7 @@ const (
 	scBranchSelect
 	scBaseConfig
 	scMatch
+	scContinue
 	scStyle
 	scModel
 	scProgress
@@ -114,6 +116,10 @@ type Model struct {
 	anchorAuthor     string       // its author (used only to word the match prompt)
 	matched          *gitx.Branch // matched branch in the current repo, or nil (no match)
 	matchCur         int          // cursor over the match-screen options
+
+	// continue-from-last-review
+	continueFromPrior bool
+	continueCur       int
 
 	styleCur int
 	modelCur int
@@ -247,6 +253,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.keyBaseConfig(msg)
 	case scMatch:
 		return m.keyMatch(msg)
+	case scContinue:
+		return m.keyContinue(msg)
 	case scStyle:
 		return m.keyStyle(msg)
 	case scModel:
@@ -683,7 +691,8 @@ func (m *Model) matchManual() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// toStyleOrError proceeds to the style screen, unless every repo was skipped.
+// toStyleOrError proceeds to the style screen (via the continue screen when a
+// prior review exists), unless every repo was skipped.
 func (m *Model) toStyleOrError() (tea.Model, tea.Cmd) {
 	active := 0
 	for _, p := range m.picks {
@@ -696,8 +705,49 @@ func (m *Model) toStyleOrError() (tea.Model, tea.Cmd) {
 		m.screen = scError
 		return m, nil
 	}
+	if m.anyPriorReview() {
+		m.continueCur = 0 // default: continue from last
+		m.screen = scContinue
+		return m, nil
+	}
+	return m.gotoStyle()
+}
+
+// anyPriorReview reports whether any non-dropped pick has a saved prior review.
+func (m *Model) anyPriorReview() bool {
+	for _, p := range m.picks {
+		if !p.dropped && p.branch.Ref != "" && history.Has(p.repo.Path, p.branch.Ref) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) gotoStyle() (tea.Model, tea.Cmd) {
 	m.screen = scStyle
 	m.styleCur = indexOfStyle(m.cfg.Folder(m.folderKey).Style)
+	return m, nil
+}
+
+// keyContinue: choose between continuing from the last review or a fresh one.
+func (m *Model) keyContinue(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc":
+		return m, tea.Quit
+	case "up", "k":
+		m.continueCur = 0
+	case "down", "j":
+		m.continueCur = 1
+	case "c":
+		m.continueFromPrior = true
+		return m.gotoStyle()
+	case "f":
+		m.continueFromPrior = false
+		return m.gotoStyle()
+	case "enter":
+		m.continueFromPrior = m.continueCur == 0
+		return m.gotoStyle()
+	}
 	return m, nil
 }
 
@@ -768,7 +818,7 @@ func (m *Model) startReview() tea.Cmd {
 		}
 	}
 	return tea.Batch(
-		launchReview(m.ctx, m.ws, active, style, model, m.binPath, m.events),
+		launchReview(m.ctx, m.ws, active, style, model, m.binPath, m.continueFromPrior, m.events),
 		m.waitForEvent(),
 		m.spin.Tick,
 	)

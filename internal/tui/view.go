@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"silly-review/internal/history"
 	"silly-review/internal/render"
 	"silly-review/internal/review"
 )
@@ -64,6 +65,8 @@ func (m *Model) View() string {
 		return m.viewBaseConfig()
 	case scMatch:
 		return m.viewMatch()
+	case scContinue:
+		return m.viewContinue()
 	case scStyle:
 		return m.viewStyle()
 	case scModel:
@@ -260,6 +263,42 @@ func (m *Model) viewMatch() string {
 		help = "↑/↓ move · enter choose · y yes · s skip · m manual · q quit"
 	}
 	b.WriteString("\n" + helpStyle.Render(help))
+	return b.String()
+}
+
+// viewContinue offers to continue from a saved prior review (only shown when one
+// exists for a selected branch).
+func (m *Model) viewContinue() string {
+	var b strings.Builder
+	b.WriteString(header("found a previous review",
+		"You've reviewed one of these branches before. Continuing re-checks the current code against that review — confirming what you've fixed and only re-raising what still stands — instead of starting from scratch."))
+
+	for _, p := range m.picks {
+		if p.dropped {
+			continue
+		}
+		if e, ok := history.Load(p.repo.Path, p.branch.Ref); ok {
+			n := len(e.Review.Findings)
+			b.WriteString(dimStyle.Render(fmt.Sprintf("• %s/%s — %d finding(s), %s",
+				p.repo.Name, p.branch.Name, n, e.When.Format("Jan 2 15:04"))) + "\n")
+		}
+	}
+	b.WriteString("\n")
+
+	options := []string{
+		"[c] Continue from the previous review",
+		"[f] Start a fresh review",
+	}
+	for i, opt := range options {
+		cursor := "  "
+		label := opt
+		if i == m.continueCur {
+			cursor = cursorStyle.Render("▸ ")
+			label = cursorStyle.Render(label)
+		}
+		b.WriteString(cursor + label + "\n")
+	}
+	b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter choose · c continue · f fresh · q quit"))
 	return b.String()
 }
 

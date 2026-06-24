@@ -15,12 +15,14 @@ import (
 	"runtime/debug"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"silly-review/internal/config"
 	"silly-review/internal/discover"
 	"silly-review/internal/gitx"
+	"silly-review/internal/history"
 	"silly-review/internal/render"
 	"silly-review/internal/review"
 	"silly-review/internal/tui"
@@ -35,6 +37,7 @@ var (
 	flagNoFetch bool
 	flagJSON    bool
 	flagOut     string
+	flagFresh   bool
 )
 
 func main() {
@@ -55,6 +58,7 @@ func main() {
 	root.Flags().BoolVar(&flagNoFetch, "no-fetch", false, "do not fetch from the remote before listing branches")
 	root.Flags().BoolVar(&flagJSON, "json", false, "with --no-tui, print the structured review as JSON")
 	root.Flags().StringVar(&flagOut, "out", "", "with --no-tui, also write the markdown report to this file")
+	root.Flags().BoolVar(&flagFresh, "fresh", false, "ignore any saved prior review for this branch and review from scratch")
 
 	root.AddCommand(configCmd())
 	root.AddCommand(updateCmd())
@@ -204,19 +208,30 @@ func runHeadless(ctx context.Context, cfg *config.Config, disc *discover.Result,
 	style := review.StyleByKey(firstNonEmpty(flagStyle, cfg.Folder(repo.Path).Style))
 	model := firstNonEmpty(flagModel, cfg.Folder(repo.Path).Model, config.DefaultModel)
 
+	var prior *review.Review
+	if !flagFresh {
+		if e, ok := history.Load(repo.Path, head); ok {
+			prior = &e.Review
+			fmt.Fprintln(os.Stderr, "continuing from the previous review (pass --fresh to start over)")
+		}
+	}
+
 	fmt.Fprintf(os.Stderr, "reviewing %s vs %s (%s, %s)…\n", head, base, model, style.Key)
 	prog := newProgress(os.Stderr)
 	prog.start()
 	res, err := review.RunWithResume(ctx, review.Options{
 		Model:           model,
 		System:          review.SystemPrompt(style),
-		Prompt:          review.BuildPrompt(rc, nil),
+		Prompt:          review.BuildPrompt(rc, nil, prior),
 		PrimaryWorktree: wt.Path,
 		BinPath:         bin,
 	}, prog.event)
 	prog.stop()
 	if err != nil {
 		return err
+	}
+	if res.Review != nil {
+		_ = history.Save(repo.Path, head, history.Entry{Repo: repo.Name, Branch: head, Base: base, When: time.Now(), Review: *res.Review})
 	}
 
 	if flagJSON {

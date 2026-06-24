@@ -3,24 +3,26 @@ package tui
 import (
 	"context"
 	"fmt"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"silly-review/internal/gitx"
+	"silly-review/internal/history"
 	"silly-review/internal/render"
 	"silly-review/internal/review"
 )
 
 // launchReview starts the review goroutine and returns immediately. Progress
 // flows back through events; the model drains it via waitForEvent.
-func launchReview(ctx context.Context, ws *gitx.Workspace, picks []*repoPick, style review.Style, model, binPath string, events chan tea.Msg) tea.Cmd {
+func launchReview(ctx context.Context, ws *gitx.Workspace, picks []*repoPick, style review.Style, model, binPath string, continuePrior bool, events chan tea.Msg) tea.Cmd {
 	return func() tea.Msg {
-		go runReviews(ctx, ws, picks, style, model, binPath, events)
+		go runReviews(ctx, ws, picks, style, model, binPath, continuePrior, events)
 		return nil
 	}
 }
 
-func runReviews(ctx context.Context, ws *gitx.Workspace, picks []*repoPick, style review.Style, model, binPath string, events chan tea.Msg) {
+func runReviews(ctx context.Context, ws *gitx.Workspace, picks []*repoPick, style review.Style, model, binPath string, continuePrior bool, events chan tea.Msg) {
 	send := func(msg tea.Msg) {
 		select {
 		case events <- msg:
@@ -84,7 +86,16 @@ func runReviews(ctx context.Context, ws *gitx.Workspace, picks []*repoPick, styl
 			continue
 		}
 
-		send(logMsg{repo: name, text: fmt.Sprintf("reviewing %s vs %s…", head, base)})
+		var prior *review.Review
+		if continuePrior {
+			if e, ok := history.Load(pr.pick.repo.Path, head); ok {
+				prior = &e.Review
+				send(logMsg{repo: name, text: "continuing from the previous review…"})
+			}
+		}
+		if prior == nil {
+			send(logMsg{repo: name, text: fmt.Sprintf("reviewing %s vs %s…", head, base)})
+		}
 		var others []review.RepoContext
 		var otherPaths []string
 		for j, o := range preps {
@@ -97,7 +108,7 @@ func runReviews(ctx context.Context, ws *gitx.Workspace, picks []*repoPick, styl
 		opts := review.Options{
 			Model:           model,
 			System:          sys,
-			Prompt:          review.BuildPrompt(pr.rc, others),
+			Prompt:          review.BuildPrompt(pr.rc, others, prior),
 			PrimaryWorktree: pr.wt.Path,
 			OtherWorktrees:  otherPaths,
 			BinPath:         binPath,
@@ -125,6 +136,12 @@ func runReviews(ctx context.Context, ws *gitx.Workspace, picks []*repoPick, styl
 			totalCost += res.CostUSD
 			rr.Review = res.Review
 			rr.RawText = res.RawText
+			// Save the review so the next pass can continue from it.
+			if res.Review != nil {
+				_ = history.Save(pr.pick.repo.Path, head, history.Entry{
+					Repo: name, Branch: head, Base: base, When: time.Now(), Review: *res.Review,
+				})
+			}
 		}
 		reviews = append(reviews, rr)
 	}
