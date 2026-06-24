@@ -350,15 +350,18 @@ func loadRepoCmd(ctx context.Context, repo *gitx.Repo, fetch bool, idx int) tea.
 		if fetch {
 			_ = gitx.Fetch(ctx, repo.Path, repo.Remote)
 		}
-		branches, err := gitx.RemoteBranches(ctx, repo.Path, repo.Remote)
+		remoteB, err := gitx.RemoteBranches(ctx, repo.Path, repo.Remote)
 		if err != nil {
 			return repoLoadedMsg{idx: idx, err: err}
 		}
+		localB, _ := gitx.LocalBranches(ctx, repo.Path) // best-effort: also offer unpushed local work
+		branches := gitx.MergeBranchLists(localB, remoteB)
 		if len(branches) == 0 {
-			return repoLoadedMsg{idx: idx, err: fmt.Errorf("%s has no remote branches", repo.Name)}
+			return repoLoadedMsg{idx: idx, err: fmt.Errorf("%s has no branches to review", repo.Name)}
 		}
 		def, _ := gitx.DefaultBranch(ctx, repo.Path, repo.Remote)
-		return repoLoadedMsg{idx: idx, branches: branches, defaultBranch: def, candidates: baseCandidates(def, branches)}
+		// Base candidates stay remote-only — you diff against an integration branch.
+		return repoLoadedMsg{idx: idx, branches: branches, defaultBranch: def, candidates: baseCandidates(def, remoteB)}
 	}
 }
 
