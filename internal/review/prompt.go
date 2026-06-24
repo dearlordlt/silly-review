@@ -18,11 +18,10 @@ type Style struct {
 // Styles are the presets shown in the picker. Order matters (first = default-ish).
 var Styles = []Style{
 	{
-		Key:  "thorough",
-		Name: "Thorough PR review",
-		Desc: "Correctness, design, edge cases, naming, tests. The default high-signal review.",
-		Addendum: "Do a complete review: correctness, edge cases, design, readability, naming, error handling, and test coverage. " +
-			"Include a few genuine praise notes where the code is notably good, but keep them rare and specific.",
+		Key:      "thorough",
+		Name:     "Thorough PR review",
+		Desc:     "Correctness, design, edge cases, naming, tests. The default high-signal review.",
+		Addendum: "Be exhaustive: go through every changed file and surface ALL real issues — correctness, edge cases, races, error handling, design, readability, naming, and missing tests — however many there are (could be zero, could be a dozen). Do not curate down to a tidy handful. Praise is optional and not expected on every review: add a praise note only for genuinely notable code, never as a token positive to balance the criticism.",
 	},
 	{
 		Key:  "blocking",
@@ -61,7 +60,7 @@ const basePersona = `You are a staff-level software engineer doing a focused rev
 
 Write the way a sharp human reviewer writes:
 - Direct and specific. No preamble, no "Overall this looks great, but...", no AI throat-clearing, no flattery.
-- Every comment must earn its place. A handful of high-signal comments beats a wall of nitpicks. If something is fine, say nothing about it.
+- Report EVERY real issue you find — never cap the count to seem concise or "balanced". There is no target number of comments. Don't invent filler or restate the obvious, but never drop a genuine problem to keep the list short. If a file is genuinely clean, say nothing about it; if it has five real issues, report all five.
 - Comment only on the changed lines and their direct consequences — not pre-existing code unless the change makes it newly wrong.
 - Respect the project's own conventions. Read AGENTS.md, CLAUDE.md, and .claude/ if present, and match the surrounding code's style; do not impose your own preferences over an established pattern.
 - For each finding give: the exact file and 1-based line number on the NEW side of the diff, a verbatim code_snippet of that line (so the reviewer can Ctrl-F to it in the web PR), a clear comment, an honest severity, and a concrete suggestion when the fix is obvious.
@@ -88,8 +87,9 @@ type RepoContext struct {
 
 // BuildPrompt produces the -p prompt. We hand claude the scope and let it pull
 // the actual diff/files itself via its read-only tools (keeps the prompt small
-// and lets it read full context, not just the patch).
-func BuildPrompt(primary RepoContext, others []RepoContext) string {
+// and lets it read full context, not just the patch). When prior != nil, the
+// review continues from that earlier pass instead of starting over.
+func BuildPrompt(primary RepoContext, others []RepoContext, prior *Review) string {
 	var b strings.Builder
 	b.WriteString("Review the changes on the following branch(es). Produce findings that conform to the provided JSON schema.\n\n")
 
@@ -125,6 +125,35 @@ func BuildPrompt(primary RepoContext, others []RepoContext) string {
 	writeRepo(primary, true)
 	for _, o := range others {
 		writeRepo(o, false)
+	}
+
+	if prior != nil {
+		b.WriteString("## PREVIOUS REVIEW of this branch — continue from it, don't start over\n")
+		b.WriteString("You reviewed an earlier version of this branch; the author has likely pushed changes since. Re-review the CURRENT code:\n")
+		b.WriteString("- For each prior finding, check the current code: only re-report it if it still stands (keep the same severity/title so it's recognizable). Drop the ones that are now fixed.\n")
+		b.WriteString("- Add any NEW issues introduced since.\n")
+		b.WriteString("- In the summary, briefly say what was resolved vs. still open since the last review.\n")
+		if prior.Verdict != "" {
+			fmt.Fprintf(&b, "Prior verdict: %s\n", prior.Verdict)
+		}
+		if s := strings.TrimSpace(prior.Summary); s != "" {
+			fmt.Fprintf(&b, "Prior summary: %s\n", s)
+		}
+		if len(prior.Findings) > 0 {
+			b.WriteString("Prior findings:\n")
+			for _, f := range prior.Findings {
+				loc := f.File
+				if f.StartLine > 0 {
+					loc = fmt.Sprintf("%s:%d", f.File, f.StartLine)
+				}
+				repoTag := ""
+				if f.Repo != "" {
+					repoTag = f.Repo + " "
+				}
+				fmt.Fprintf(&b, "  - [%s] %s%s — %s\n", f.Severity, repoTag, loc, f.Title)
+			}
+		}
+		b.WriteString("\n")
 	}
 
 	b.WriteString("Instructions:\n")
