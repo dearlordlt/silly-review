@@ -230,7 +230,10 @@ func runHeadless(ctx context.Context, cfg *config.Config, disc *discover.Result,
 	if err != nil {
 		return err
 	}
-	if res.Review != nil {
+	// Only save a clean review — an error result can still carry partial
+	// structured output, and saving it would clobber a good prior. (The TUI path
+	// guards this the same way, in its switch default case.)
+	if !res.IsError && res.Review != nil {
 		_ = history.Save(repo.Path, head, history.Entry{Repo: repo.Name, Branch: head, Base: base, When: time.Now(), Review: *res.Review})
 	}
 
