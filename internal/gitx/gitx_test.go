@@ -130,6 +130,13 @@ func TestLocalBranchesAndMerge(t *testing.T) {
 		t.Fatalf("expected local krea2 with Ref=krea2, got %+v", local)
 	}
 
+	remoteForMerge, _ := RemoteBranches(ctx, repo.Path, repo.Remote)
+	for _, b := range MergeBranchLists(local, remoteForMerge) {
+		if b.Name == "krea2" && !b.Unpushed {
+			t.Fatal("merged krea2 (no remote counterpart) must be flagged Unpushed")
+		}
+	}
+
 	remote, _ := RemoteBranches(ctx, repo.Path, repo.Remote) // main, feature
 	merged := MergeBranchLists(local, remote)
 	names := map[string]bool{}
@@ -148,6 +155,63 @@ func TestLocalBranchesAndMerge(t *testing.T) {
 	if !localKept || !names["main"] || !names["feature"] {
 		t.Fatalf("merged set wrong: %v", names)
 	}
+}
+
+// TestCurrentBranchAndCheckLists covers the health-check target picker: the
+// checked-out branch is detected and pinned first, locals shadow their
+// same-name remotes, and remote-only branches still appear.
+func TestCurrentBranchAndCheckLists(t *testing.T) {
+	ctx, repo := fixture(t)
+	mustGit(t, repo.Path, "checkout", "-q", "-b", "krea2")
+	writeFile(t, repo.Path, "k.go", "package k\n")
+	mustGit(t, repo.Path, "add", ".")
+	mustGit(t, repo.Path, "commit", "-qm", "local work")
+
+	if cur := CurrentBranch(ctx, repo.Path); cur != "krea2" {
+		t.Fatalf("CurrentBranch = %q, want krea2", cur)
+	}
+
+	// Drop the local feature branch so origin/feature is remote-only.
+	mustGit(t, repo.Path, "branch", "-q", "-D", "feature")
+
+	local, _ := LocalBranches(ctx, repo.Path)                // main, krea2
+	remote, _ := RemoteBranches(ctx, repo.Path, repo.Remote) // main, feature
+	out := CheckBranchLists(local, remote, "krea2")
+
+	if len(out) == 0 || out[0].Name != "krea2" || !out[0].Local {
+		t.Fatalf("current branch must be pinned first, got %+v", out)
+	}
+	if !out[0].Unpushed {
+		t.Fatal("krea2 has no remote counterpart — must be flagged Unpushed")
+	}
+	seen := map[string]int{}
+	for _, b := range out {
+		seen[b.Name]++
+		if b.Name == "main" && !b.Local {
+			t.Fatal("local main must shadow origin/main in check mode")
+		}
+		if b.Name == "main" && b.Unpushed {
+			t.Fatal("local main IS on the remote — must not be flagged Unpushed")
+		}
+		if b.Name == "feature" && b.Local {
+			t.Fatal("feature only exists on the remote here")
+		}
+	}
+	for name, n := range seen {
+		if n != 1 {
+			t.Fatalf("branch %s listed %d times", name, n)
+		}
+	}
+	if seen["feature"] != 1 || seen["main"] != 1 {
+		t.Fatalf("expected main (local) and feature (remote-only): %v", seen)
+	}
+
+	// Detached HEAD → no current branch.
+	mustGit(t, repo.Path, "checkout", "-q", "--detach")
+	if cur := CurrentBranch(ctx, repo.Path); cur != "" {
+		t.Fatalf("detached HEAD should give empty current branch, got %q", cur)
+	}
+	mustGit(t, repo.Path, "checkout", "-q", "krea2")
 }
 
 // TestWorktreeOfCheckedOutLocalBranch: reviewing the branch you're currently on

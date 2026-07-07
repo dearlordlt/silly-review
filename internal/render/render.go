@@ -3,6 +3,7 @@
 package render
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -140,7 +141,7 @@ func FullReport(reviews []RepoReview) string {
 // "proof of work" worth showing on a clean review.
 func ProseNotes(rr RepoReview) string {
 	notes := strings.TrimSpace(rr.RawText)
-	if notes == "" || rr.Review == nil {
+	if notes == "" || rr.Review == nil || looksLikeJSON(notes) {
 		return ""
 	}
 	sum := strings.TrimSpace(rr.Review.Summary)
@@ -148,4 +149,14 @@ func ProseNotes(rr RepoReview) string {
 		return ""
 	}
 	return notes
+}
+
+// looksLikeJSON filters out a "narrative" that is actually the structured
+// output itself: with --json-schema, claude's final result text is often the
+// raw JSON blob, and echoing that as reviewer's/auditor's notes is pure noise.
+func looksLikeJSON(s string) bool {
+	if !strings.HasPrefix(s, "{") && !strings.HasPrefix(s, "[") {
+		return false
+	}
+	return json.Valid([]byte(s))
 }

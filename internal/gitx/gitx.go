@@ -27,14 +27,15 @@ type Repo struct {
 
 // Branch is a branch with the metadata shown in the picker.
 type Branch struct {
-	Name    string    // short name without remote prefix, e.g. "feat/login"
-	Ref     string    // ref to review: "origin/feat/login" (remote) or "feat/login" (local)
-	SHA     string    // abbreviated commit hash
-	Date    time.Time // committer date
-	DateRel string    // git's relative date, e.g. "3 hours ago"
-	Author  string
-	Subject string
-	Local   bool // a local branch (e.g. unpushed work), not a remote one
+	Name     string    // short name without remote prefix, e.g. "feat/login"
+	Ref      string    // ref to review: "origin/feat/login" (remote) or "feat/login" (local)
+	SHA      string    // abbreviated commit hash
+	Date     time.Time // committer date
+	DateRel  string    // git's relative date, e.g. "3 hours ago"
+	Author   string
+	Subject  string
+	Local    bool // a local branch, not a remote one
+	Unpushed bool // a local branch with no same-name remote counterpart
 }
 
 // FileChange is one entry from `git diff --name-status`.
@@ -196,11 +197,58 @@ func MergeBranchLists(local, remote []Branch) []Branch {
 	out := make([]Branch, 0, len(local)+len(remote))
 	for _, b := range local {
 		if !rset[b.Name] { // skip local branches already represented on the remote
+			b.Unpushed = true
 			out = append(out, b)
 		}
 	}
 	out = append(out, remote...)
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Date.After(out[j].Date) })
+	return out
+}
+
+// CurrentBranch returns the short name of the branch checked out in repoPath,
+// or "" for a detached HEAD.
+func CurrentBranch(ctx context.Context, repoPath string) string {
+	out, err := run(ctx, repoPath, "symbolic-ref", "--short", "-q", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return out
+}
+
+// CheckBranchLists orders branches for a health check, which audits code as it
+// sits on the machine: local branches win over their same-name remote (the
+// local copy is what the user means, unpushed commits included), everything is
+// newest-commit first, and the currently checked-out branch is pinned to the
+// top as the default target.
+func CheckBranchLists(local, remote []Branch, current string) []Branch {
+	lset := make(map[string]bool, len(local))
+	for _, b := range local {
+		lset[b.Name] = true
+	}
+	rset := make(map[string]bool, len(remote))
+	for _, b := range remote {
+		rset[b.Name] = true
+	}
+	out := make([]Branch, 0, len(local)+len(remote))
+	for _, b := range local {
+		b.Unpushed = !rset[b.Name]
+		out = append(out, b)
+	}
+	for _, b := range remote {
+		if !lset[b.Name] {
+			out = append(out, b)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Date.After(out[j].Date) })
+	for i, b := range out {
+		if b.Local && b.Name == current {
+			cur := out[i]
+			copy(out[1:i+1], out[:i])
+			out[0] = cur
+			break
+		}
+	}
 	return out
 }
 

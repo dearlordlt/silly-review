@@ -2,11 +2,13 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"silly-review/internal/checks"
 	"silly-review/internal/gitx"
 	"silly-review/internal/history"
 	"silly-review/internal/render"
@@ -147,4 +149,87 @@ func runReviews(ctx context.Context, ws *gitx.Workspace, picks []*repoPick, styl
 	}
 
 	send(allDoneMsg{reviews: reviews, cost: totalCost})
+}
+
+// launchCheck starts the health-check goroutine and returns immediately.
+func launchCheck(ctx context.Context, ws *gitx.Workspace, pick *repoPick, cat checks.Category, scope checks.Scope, model, binPath string, continuePrior bool, events chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		go runCheck(ctx, ws, pick, cat, scope, model, binPath, continuePrior, events)
+		return nil
+	}
+}
+
+func runCheck(ctx context.Context, ws *gitx.Workspace, pick *repoPick, cat checks.Category, scope checks.Scope, model, binPath string, continuePrior bool, events chan tea.Msg) {
+	send := func(msg tea.Msg) {
+		select {
+		case events <- msg:
+		case <-ctx.Done():
+		}
+	}
+	name := pick.repo.Name
+	ref := pick.branch.Ref
+
+	send(logMsg{repo: name, text: "preparing read-only worktree…"})
+	wt, err := ws.Add(ctx, pick.repo, ref)
+	if err != nil {
+		send(reviewErrMsg{err: fmt.Errorf("%s: creating worktree: %w", name, err)})
+		return
+	}
+
+	var prior *checks.Report
+	if continuePrior {
+		if e, ok := history.LoadCheck(pick.repo.Path, ref, cat.Key, scope.Key); ok {
+			prior = &e.Report
+			send(logMsg{repo: name, text: "continuing from the previous check…"})
+		}
+	}
+	if prior == nil {
+		send(logMsg{repo: name, text: fmt.Sprintf("checking %s — %s (%s)…", ref, cat.Name, scope.Name)})
+	}
+
+	opts := review.Options{
+		Model:           model,
+		System:          checks.SystemPrompt(cat, scope),
+		Prompt:          checks.BuildPrompt(checks.Context{RepoName: name, WorktreePath: wt.Path, Ref: ref}, cat, scope, prior),
+		Schema:          checks.SchemaJSON,
+		PrimaryWorktree: wt.Path,
+		BinPath:         binPath,
+	}
+	res, err := review.RunWithResume(ctx, opts, func(e review.Event) {
+		switch e.Kind {
+		case review.EvtRetry:
+			send(retryMsg{text: e.Text})
+		case review.EvtThinking:
+			send(thinkMsg{text: e.Text})
+		default:
+			send(logMsg{repo: name, text: e.Text})
+		}
+	})
+	if ctx.Err() != nil {
+		return
+	}
+
+	cr := render.CheckResult{Repo: name, Ref: ref, Category: cat.Name, Scope: scope.Name}
+	var cost float64
+	switch {
+	case err != nil:
+		cr.Err = err.Error()
+	case res.IsError:
+		cr.Err = res.ErrMsg // guaranteed non-empty by review.Run
+	default:
+		cost = res.CostUSD
+		cr.RawText = res.RawText
+		if len(res.Structured) > 0 {
+			var rep checks.Report
+			if json.Unmarshal(res.Structured, &rep) == nil {
+				cr.Report = &rep
+				// Save so the next pass can continue from it (clean results only —
+				// the error branches above never reach here).
+				_ = history.SaveCheck(pick.repo.Path, ref, cat.Key, scope.Key, history.CheckEntry{
+					Repo: name, Ref: ref, Category: cat.Key, Scope: scope.Key, When: time.Now(), Report: rep,
+				})
+			}
+		}
+	}
+	send(checkDoneMsg{res: cr, cost: cost})
 }

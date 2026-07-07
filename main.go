@@ -1,6 +1,7 @@
 // Command silly-review is a TUI that produces senior-engineer code reviews of
-// remote branches by driving the `claude` CLI, without ever touching the user's
-// working tree.
+// git branches and whole-codebase health checks (security, tech debt,
+// performance, …) by driving the `claude` CLI, without ever touching the
+// user's working tree.
 package main
 
 import (
@@ -19,6 +20,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"silly-review/internal/checks"
 	"silly-review/internal/config"
 	"silly-review/internal/discover"
 	"silly-review/internal/gitx"
@@ -43,7 +45,7 @@ var (
 func main() {
 	root := &cobra.Command{
 		Use:           "silly-review",
-		Short:         "Senior-engineer code reviews of remote branches, powered by Claude — read-only, never touches your working tree.",
+		Short:         "Senior-engineer code reviews of git branches and codebase health checks, powered by Claude — read-only, never touches your working tree.",
 		Version:       buildVersion(),
 		Args:          cobra.NoArgs,
 		RunE:          runReview,
@@ -62,6 +64,7 @@ func main() {
 
 	root.AddCommand(configCmd())
 	root.AddCommand(updateCmd())
+	root.AddCommand(checkCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "silly-review: "+err.Error())
@@ -237,15 +240,6 @@ func runHeadless(ctx context.Context, cfg *config.Config, disc *discover.Result,
 		_ = history.Save(repo.Path, head, history.Entry{Repo: repo.Name, Branch: head, Base: base, When: time.Now(), Review: *res.Review})
 	}
 
-	if flagJSON {
-		if res.Review == nil {
-			return fmt.Errorf("no structured review: %s", firstNonEmpty(res.ErrMsg, res.RawText, res.Stderr, "claude returned no structured output"))
-		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(res.Review)
-	}
-
 	rr := render.RepoReview{Repo: repo.Name, Branch: head, Base: base}
 	if res.IsError {
 		rr.Err = res.ErrMsg
@@ -254,16 +248,29 @@ func runHeadless(ctx context.Context, cfg *config.Config, disc *discover.Result,
 		rr.RawText = res.RawText
 	}
 	report := render.FullReport([]render.RepoReview{rr})
-	fmt.Print(report)
+
+	if flagJSON {
+		if res.Review == nil {
+			return fmt.Errorf("no structured review: %s", firstNonEmpty(res.ErrMsg, res.RawText, res.Stderr, "claude returned no structured output"))
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(res.Review); err != nil {
+			return err
+		}
+	} else {
+		fmt.Print(report)
+	}
+	// --out always gets the markdown report, --json included.
 	if flagOut != "" {
 		if err := os.WriteFile(flagOut, []byte(report), 0o644); err != nil {
 			return fmt.Errorf("writing report: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "wrote %s\n", flagOut)
 	}
-	// Reflect a failed review in the exit code so CI/scripting can tell a
-	// transient/auth/overload failure apart from a clean pass (the report still
-	// printed above for the human).
+	// Reflect a failed review in the exit code — in JSON mode too, since an
+	// is_error result can still carry partial structured output — so CI can tell
+	// a transient/auth/overload failure apart from a clean pass.
 	if res.IsError {
 		return fmt.Errorf("review failed: %s", res.ErrMsg)
 	}
@@ -302,6 +309,211 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// checkCmd is the headless health check: audit the codebase at a ref through a
+// chosen lens and print the report (the TUI offers the same via the first
+// screen's "Check the codebase").
+func checkCmd() *cobra.Command {
+	var (
+		catFlag    string
+		scopeFlag  string
+		branchFlag string
+		modelFlag  string
+		jsonFlag   bool
+		outFlag    string
+		freshFlag  bool
+		noFetch    bool
+		listFlag   bool
+	)
+	c := &cobra.Command{
+		Use:   "check",
+		Short: "Headless codebase health check (security, tech debt, performance, …) with paste-ready fix prompts",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if listFlag {
+				for _, cat := range checks.Categories {
+					fmt.Printf("%-14s %s\n", cat.Key, cat.Desc)
+					for _, s := range cat.Scopes {
+						fmt.Printf("    --scope %-12s %s\n", s.Key, s.Desc)
+					}
+				}
+				return nil
+			}
+			if catFlag == "" {
+				return fmt.Errorf("--category is required (run `silly-review check --list` to see them)")
+			}
+			cat, ok := checks.CategoryByKey(catFlag)
+			if !ok {
+				return fmt.Errorf("unknown category %q — run `silly-review check --list`", catFlag)
+			}
+			scope := checks.ScopeByKey(cat, scopeFlag)
+			if scopeFlag != "" && scope.Key != scopeFlag {
+				return fmt.Errorf("category %s has no scope %q — run `silly-review check --list`", cat.Key, scopeFlag)
+			}
+			return runHeadlessCheck(cmd.Context(), cat, scope, branchFlag, modelFlag, jsonFlag, outFlag, freshFlag, noFetch)
+		},
+	}
+	c.Flags().StringVar(&catFlag, "category", "", "audit lens (security|debt|performance|tests|resilience|deps|observability)")
+	c.Flags().StringVar(&scopeFlag, "scope", "", "narrower scope within the category (default: general)")
+	c.Flags().StringVar(&branchFlag, "branch", "", "branch to audit (default: the currently checked-out branch)")
+	c.Flags().StringVar(&modelFlag, "model", "", "model alias (opus|sonnet|haiku|fable); overrides remembered choice")
+	c.Flags().BoolVar(&jsonFlag, "json", false, "print the structured report as JSON")
+	c.Flags().StringVar(&outFlag, "out", "", "also write the markdown report to this file")
+	c.Flags().BoolVar(&freshFlag, "fresh", false, "ignore any saved prior check and audit from scratch")
+	c.Flags().BoolVar(&noFetch, "no-fetch", false, "do not fetch from the remote first")
+	c.Flags().BoolVar(&listFlag, "list", false, "list categories and scopes, then exit")
+	return c
+}
+
+func runHeadlessCheck(ctx context.Context, cat checks.Category, scope checks.Scope, branch, modelFlag string, jsonOut bool, outFile string, fresh, noFetch bool) error {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	disc, err := discover.Discover(ctx, cwd)
+	if err != nil {
+		return err
+	}
+	if disc.Mode == discover.Multi {
+		return fmt.Errorf("cd into the repo you want to check (found %d repos here)", len(disc.Repos))
+	}
+	if len(disc.Repos) == 0 {
+		return fmt.Errorf("no git repository found here")
+	}
+	repo := disc.Repos[0]
+	bin := claudeBin()
+	if err := review.Preflight(ctx, bin); err != nil {
+		return err
+	}
+
+	if !noFetch && repo.Remote != "" {
+		_ = gitx.Fetch(ctx, repo.Path, repo.Remote)
+	}
+
+	// Resolve the ref to audit: explicit branch (local first — a check audits
+	// what's on this machine), else the checked-out branch, else detached HEAD.
+	ref := ""
+	switch {
+	case branch != "":
+		cands := []string{branch}
+		if repo.Remote != "" {
+			cands = append(cands, repo.Remote+"/"+branch)
+		}
+		for _, c := range cands {
+			if gitx.RefExists(ctx, repo.Path, c) {
+				ref = c
+				break
+			}
+		}
+		if ref == "" {
+			return fmt.Errorf("branch %q not found (locally or on the remote)", branch)
+		}
+	default:
+		if cur := gitx.CurrentBranch(ctx, repo.Path); cur != "" {
+			ref = cur
+		} else {
+			ref = "HEAD" // detached — audit whatever is checked out
+		}
+	}
+
+	ws, err := gitx.NewWorkspace()
+	if err != nil {
+		return err
+	}
+	defer ws.Cleanup()
+	go func() {
+		<-ctx.Done()
+		ws.Cleanup()
+	}()
+
+	wt, err := ws.Add(ctx, repo, ref)
+	if err != nil {
+		return fmt.Errorf("creating worktree: %w", err)
+	}
+
+	var prior *checks.Report
+	if !fresh {
+		if e, ok := history.LoadCheck(repo.Path, ref, cat.Key, scope.Key); ok {
+			prior = &e.Report
+			fmt.Fprintln(os.Stderr, "continuing from the previous check (pass --fresh to start over)")
+		}
+	}
+
+	model := firstNonEmpty(modelFlag, cfg.Folder(repo.Path).Model, config.DefaultModel)
+	fmt.Fprintf(os.Stderr, "checking %s at %s — %s (%s), %s…\n", repo.Name, ref, cat.Name, scope.Name, model)
+	prog := newProgress(os.Stderr)
+	prog.start()
+	res, err := review.RunWithResume(ctx, review.Options{
+		Model:           model,
+		System:          checks.SystemPrompt(cat, scope),
+		Prompt:          checks.BuildPrompt(checks.Context{RepoName: repo.Name, WorktreePath: wt.Path, Ref: ref}, cat, scope, prior),
+		Schema:          checks.SchemaJSON,
+		PrimaryWorktree: wt.Path,
+		BinPath:         bin,
+	}, prog.event)
+	prog.stop()
+	if err != nil {
+		return err
+	}
+
+	cr := render.CheckResult{Repo: repo.Name, Ref: ref, Category: cat.Name, Scope: scope.Name}
+	var report *checks.Report
+	if len(res.Structured) > 0 {
+		var rep checks.Report
+		if json.Unmarshal(res.Structured, &rep) == nil {
+			report = &rep
+		}
+	}
+	// Only save a clean check — an error result can still carry partial
+	// structured output, and saving it would clobber a good prior.
+	if !res.IsError && report != nil {
+		_ = history.SaveCheck(repo.Path, ref, cat.Key, scope.Key, history.CheckEntry{
+			Repo: repo.Name, Ref: ref, Category: cat.Key, Scope: scope.Key, When: time.Now(), Report: *report,
+		})
+	}
+
+	if res.IsError {
+		cr.Err = res.ErrMsg
+	} else {
+		cr.Report = report
+		cr.RawText = res.RawText
+	}
+	out := render.CheckReportMarkdown(cr)
+
+	if jsonOut {
+		if report == nil {
+			return fmt.Errorf("no structured report: %s", firstNonEmpty(res.ErrMsg, res.RawText, res.Stderr, "claude returned no structured output"))
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(report); err != nil {
+			return err
+		}
+	} else {
+		fmt.Print(out)
+	}
+	// --out always gets the markdown report, --json included (JSON to stdout +
+	// file, as the README promises).
+	if outFile != "" {
+		if err := os.WriteFile(outFile, []byte(out), 0o644); err != nil {
+			return fmt.Errorf("writing report: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "wrote %s\n", outFile)
+	}
+	// A failed run must exit non-zero even in JSON mode — an is_error result can
+	// still carry partial structured output, and CI must not mistake it for a pass.
+	if res.IsError {
+		return fmt.Errorf("check failed: %s", res.ErrMsg)
+	}
+	return nil
 }
 
 // setup script URLs, reused by `silly-review update`.

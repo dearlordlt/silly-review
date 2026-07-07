@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"silly-review/internal/checks"
 	"silly-review/internal/history"
 	"silly-review/internal/render"
 	"silly-review/internal/review"
@@ -25,18 +26,33 @@ var (
 
 func sevColor(sev string) lipgloss.Color {
 	switch sev {
-	case "blocker":
+	case "blocker", "critical":
 		return lipgloss.Color("196")
-	case "major":
+	case "major", "high":
 		return lipgloss.Color("208")
-	case "minor":
+	case "minor", "medium":
 		return lipgloss.Color("220")
-	case "nit":
+	case "nit", "low":
 		return lipgloss.Color("245")
-	case "question":
+	case "question", "info":
 		return lipgloss.Color("39")
 	case "praise":
 		return lipgloss.Color("42")
+	default:
+		return lipgloss.Color("245")
+	}
+}
+
+func healthColor(h string) lipgloss.Color {
+	switch h {
+	case "good":
+		return lipgloss.Color("42")
+	case "needs_attention":
+		return lipgloss.Color("220")
+	case "at_risk":
+		return lipgloss.Color("208")
+	case "critical":
+		return lipgloss.Color("196")
 	default:
 		return lipgloss.Color("245")
 	}
@@ -55,6 +71,8 @@ func (m *Model) dims() (int, int) {
 
 func (m *Model) View() string {
 	switch m.screen {
+	case scMode:
+		return m.viewMode()
 	case scRepoSelect:
 		return m.viewRepoSelect()
 	case scLoading:
@@ -69,16 +87,44 @@ func (m *Model) View() string {
 		return m.viewContinue()
 	case scStyle:
 		return m.viewStyle()
+	case scCategory:
+		return m.viewCategory()
+	case scScope:
+		return m.viewScope()
 	case scModel:
 		return m.viewModel()
 	case scProgress:
 		return m.viewProgress()
 	case scResults:
+		if m.mode == modeCheck {
+			return m.viewCheckResults()
+		}
 		return m.viewResults()
 	case scError:
 		return m.viewError()
 	}
 	return ""
+}
+
+func (m *Model) viewMode() string {
+	var b strings.Builder
+	b.WriteString(header("what should Claude do?",
+		"Both run read-only on your Claude subscription — nothing is ever written to your repos."))
+	options := []struct{ name, desc string }{
+		{"[r] Review a branch", "PR-style review of a branch's changes against its base — comments you can paste into GitHub/GitLab."},
+		{"[c] Check the codebase", "Audit the code as it stands (security, tech debt, performance…) — every finding comes with a fix prompt you can paste into Claude Code or Cursor."},
+	}
+	for i, opt := range options {
+		cursor := "  "
+		name := opt.name
+		if i == m.modeCur {
+			cursor = cursorStyle.Render("▸ ")
+			name = cursorStyle.Render(name)
+		}
+		b.WriteString(fmt.Sprintf("%s%s\n      %s\n", cursor, name, dimStyle.Render(opt.desc)))
+	}
+	b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter choose · r review · c check · q quit"))
+	return b.String()
 }
 
 func header(title, sub string) string {
@@ -101,6 +147,23 @@ func (m *Model) statusLine() string {
 }
 
 func (m *Model) viewRepoSelect() string {
+	// Check mode audits one repo at a time — a plain single-choice list.
+	if m.mode == modeCheck {
+		var b strings.Builder
+		b.WriteString(header("pick the repo to check",
+			"A health check audits one codebase at a time. Run it again for another repo."))
+		for i, r := range m.repos {
+			cursor := "  "
+			name := r.Name
+			if i == m.repoCur {
+				cursor = cursorStyle.Render("▸ ")
+				name = cursorStyle.Render(name)
+			}
+			b.WriteString(fmt.Sprintf("%s%s\n", cursor, name))
+		}
+		b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter choose · esc back · q quit"))
+		return b.String()
+	}
 	var b strings.Builder
 	b.WriteString(header("pick the repos this change touches",
 		"A feature can span several repos (frontend, backend, deploy). Check every repo involved — you'll choose one branch per repo next. Last run's picks are pre-checked."))
@@ -118,7 +181,7 @@ func (m *Model) viewRepoSelect() string {
 	if m.statusMsg != "" {
 		b.WriteString("\n" + dimStyle.Render(m.statusMsg))
 	}
-	b.WriteString("\n" + helpStyle.Render("↑/↓ move · space check/uncheck · a check all · enter continue · q quit"))
+	b.WriteString("\n" + helpStyle.Render("↑/↓ move · space check/uncheck · a check all · enter continue · esc back · q quit"))
 	return b.String()
 }
 
@@ -130,18 +193,26 @@ func (m *Model) viewLoading() string {
 func (m *Model) viewBranchSelect() string {
 	w, _ := m.dims()
 	p := m.picks[m.cur]
-	var sub string
-	switch {
-	case len(m.picks) <= 1:
-		sub = fmt.Sprintf("%s  ·  diffed against %s  ·  your unpushed branches + remote, newest first", p.repo.Name, p.base)
-	case m.anchorBranchName == "":
-		// The anchor repo — its branch name drives matching in the others.
-		sub = fmt.Sprintf("repo 1/%d · %s  ·  base %s  ·  this branch's name is matched against the other repos next", len(m.picks), p.repo.Name, p.base)
-	default:
-		sub = fmt.Sprintf("%s  ·  base %s  ·  newest first", p.repo.Name, p.base)
+	var title, sub, help string
+	if m.mode == modeCheck {
+		title = fmt.Sprintf("pick the branch to check in %s", p.repo.Name)
+		sub = "The whole codebase is audited as it stands on this branch — no diff, no base. Your checked-out branch is first."
+		help = "↑/↓ move · enter check this branch · esc back · q quit"
+	} else {
+		title = fmt.Sprintf("pick the branch to review in %s", p.repo.Name)
+		switch {
+		case len(m.picks) <= 1:
+			sub = fmt.Sprintf("%s  ·  diffed against %s  ·  your unpushed branches + remote, newest first", p.repo.Name, p.base)
+		case m.anchorBranchName == "":
+			// The anchor repo — its branch name drives matching in the others.
+			sub = fmt.Sprintf("repo 1/%d · %s  ·  base %s  ·  this branch's name is matched against the other repos next", len(m.picks), p.repo.Name, p.base)
+		default:
+			sub = fmt.Sprintf("%s  ·  base %s  ·  newest first", p.repo.Name, p.base)
+		}
+		help = "↑/↓ move · enter review this branch · c change base · q quit"
 	}
 	var b strings.Builder
-	b.WriteString(header(fmt.Sprintf("pick the branch to review in %s", p.repo.Name), sub))
+	b.WriteString(header(title, sub))
 	for i, br := range m.branches {
 		cursor := "  "
 		name := br.Name
@@ -150,7 +221,10 @@ func (m *Model) viewBranchSelect() string {
 			name = cursorStyle.Render(name)
 		}
 		tag := ""
-		if br.Local {
+		switch {
+		case m.mode == modeCheck && br.Local && br.Name == m.currentBranch:
+			tag = selStyle.Render(" (current)")
+		case br.Local && br.Unpushed:
 			tag = selStyle.Render(" (local, unpushed)")
 		}
 		meta := dimStyle.Render(fmt.Sprintf("%s · %s", br.Author, br.DateRel))
@@ -160,7 +234,7 @@ func (m *Model) viewBranchSelect() string {
 	if m.statusMsg != "" {
 		b.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Render("! "+m.statusMsg) + "\n")
 	}
-	b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter review this branch · c change base · q quit"))
+	b.WriteString("\n" + helpStyle.Render(help))
 	return b.String()
 }
 
@@ -266,10 +340,73 @@ func (m *Model) viewMatch() string {
 	return b.String()
 }
 
-// viewContinue offers to continue from a saved prior review (only shown when one
-// exists for a selected branch).
+func (m *Model) viewCategory() string {
+	var b strings.Builder
+	b.WriteString(header("what should the check look for?",
+		"Each lens audits the whole codebase for one class of problems. Remembered for this folder; run several lenses one after another if you want the full picture."))
+	for i, c := range checks.Categories {
+		cursor := "  "
+		name := c.Name
+		if i == m.catCur {
+			cursor = cursorStyle.Render("▸ ")
+			name = cursorStyle.Render(name)
+		}
+		b.WriteString(fmt.Sprintf("%s%s\n      %s\n", cursor, name, dimStyle.Render(c.Desc)))
+	}
+	b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter next · esc back · q quit"))
+	return b.String()
+}
+
+func (m *Model) viewScope() string {
+	cat := checks.Categories[m.catCur]
+	var b strings.Builder
+	b.WriteString(header(fmt.Sprintf("how broad should the %s check be?", cat.Name),
+		"General covers the whole lens; a narrower scope digs deeper into one area for the same time and cost."))
+	for i, s := range cat.Scopes {
+		cursor := "  "
+		name := s.Name
+		if i == m.scopeCur {
+			cursor = cursorStyle.Render("▸ ")
+			name = cursorStyle.Render(name)
+		}
+		b.WriteString(fmt.Sprintf("%s%s\n      %s\n", cursor, name, dimStyle.Render(s.Desc)))
+	}
+	b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter next · esc back · q quit"))
+	return b.String()
+}
+
+// viewContinue offers to continue from a saved prior review/check (only shown
+// when one exists for the selection).
 func (m *Model) viewContinue() string {
 	var b strings.Builder
+	if m.mode == modeCheck {
+		b.WriteString(header("found a previous check",
+			"You've run this exact check before. Continuing re-audits the current code against it — confirming what you've fixed and only re-raising what still stands — instead of starting from scratch."))
+		p := m.picks[m.cur]
+		cat := checks.Categories[m.catCur]
+		scope := cat.Scopes[m.scopeCur]
+		if e, ok := history.LoadCheck(p.repo.Path, p.branch.Ref, cat.Key, scope.Key); ok {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("• %s/%s — %s (%s) — %d finding(s), %s",
+				p.repo.Name, p.branch.Name, cat.Name, scope.Name, len(e.Report.Findings), e.When.Format("Jan 2 15:04"))) + "\n")
+		}
+		b.WriteString("\n")
+		options := []string{
+			"[c] Continue from the previous check",
+			"[f] Start a fresh check",
+		}
+		for i, opt := range options {
+			cursor := "  "
+			label := opt
+			if i == m.continueCur {
+				cursor = cursorStyle.Render("▸ ")
+				label = cursorStyle.Render(label)
+			}
+			b.WriteString(cursor + label + "\n")
+		}
+		b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter choose · c continue · f fresh · esc back · q quit"))
+		return b.String()
+	}
+
 	b.WriteString(header("found a previous review",
 		"You've reviewed one of these branches before. Continuing re-checks the current code against that review — confirming what you've fixed and only re-raising what still stands — instead of starting from scratch."))
 
@@ -319,8 +456,12 @@ func (m *Model) viewStyle() string {
 }
 
 func (m *Model) viewModel() string {
+	noun := "review"
+	if m.mode == modeCheck {
+		noun = "check"
+	}
 	var b strings.Builder
-	b.WriteString(header("choose the model", "Which Claude model runs the review. Bigger reads more carefully but takes longer. Runs on your Claude subscription — no API key, no per-token charge."))
+	b.WriteString(header("choose the model", fmt.Sprintf("Which Claude model runs the %s. Bigger reads more carefully but takes longer. Runs on your Claude subscription — no API key, no per-token charge.", noun)))
 	for i, mo := range modelChoices {
 		cursor := "  "
 		name := mo.key
@@ -330,28 +471,37 @@ func (m *Model) viewModel() string {
 		}
 		b.WriteString(fmt.Sprintf("%s%-8s %s\n", cursor, name, dimStyle.Render(mo.desc)))
 	}
-	b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter start review · esc back · q quit"))
+	b.WriteString("\n" + helpStyle.Render(fmt.Sprintf("↑/↓ move · enter start %s · esc back · q quit", noun)))
 	return b.String()
 }
 
 func (m *Model) viewProgress() string {
 	w, h := m.dims()
-	n := 0
-	for _, p := range m.picks {
-		if !p.dropped {
-			n++
+	var title, sub string
+	if m.mode == modeCheck {
+		p := m.picks[m.cur]
+		cat := checks.Categories[m.catCur]
+		title = fmt.Sprintf("checking %s — %s (%s)", p.repo.Name, cat.Name, cat.Scopes[m.scopeCur].Name)
+		sub = fmt.Sprintf("Claude is auditing the codebase at %s. A whole-repo pass takes a few minutes. Read-only — nothing is written to your repos.", p.branch.Ref)
+	} else {
+		n := 0
+		for _, p := range m.picks {
+			if !p.dropped {
+				n++
+			}
 		}
-	}
-	if n == 0 {
-		n = 1
-	}
-	noun := "branch"
-	if n > 1 {
-		noun = "branches"
+		if n == 0 {
+			n = 1
+		}
+		noun := "branch"
+		if n > 1 {
+			noun = "branches"
+		}
+		title = fmt.Sprintf("reviewing %d %s", n, noun)
+		sub = "Claude is reading each branch's diff and the surrounding code. A minute or two is normal. Read-only — nothing is written to your repos."
 	}
 	var b strings.Builder
-	b.WriteString(header(fmt.Sprintf("reviewing %d %s", n, noun),
-		"Claude is reading each branch's diff and the surrounding code. A minute or two is normal. Read-only — nothing is written to your repos."))
+	b.WriteString(header(title, sub))
 	// Live status line: spinner + the current action + elapsed time, so it never
 	// looks frozen even during Claude's long, tool-less generation phase.
 	activity := m.curActivity
@@ -437,6 +587,146 @@ func (m *Model) viewResults() string {
 
 	b.WriteString(m.statusLine())
 	b.WriteString("\n" + helpStyle.Render("↑/↓ move · y copy comment · Y copy all · f filter · q quit"))
+	return b.String()
+}
+
+// ---- check results ----
+
+func (m *Model) viewCheckResults() string {
+	w, h := m.dims()
+	fs := m.filteredChecks()
+	if m.resCur >= len(fs) {
+		m.resCur = max(0, len(fs)-1)
+	}
+
+	var b strings.Builder
+	b.WriteString(header("health check", m.checkResultSummary()))
+
+	if len(fs) == 0 {
+		if len(m.flatCheck) > 0 && m.sevFilter != "" {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("No %s findings. Press f to change filter.\n", m.sevFilter)))
+		} else {
+			b.WriteString(truncateToLines(m.checkEmptyStateBody(), h-6, "(Y copies the full report)"))
+		}
+		b.WriteString(m.statusLine())
+		b.WriteString("\n\n" + helpStyle.Render("Y copy full report · f filter · q quit"))
+		return b.String()
+	}
+
+	avail := h - 6
+	if avail < 6 {
+		avail = 6
+	}
+	listH := avail / 2
+	if listH < 3 {
+		listH = 3
+	}
+	detailH := avail - listH
+
+	start := m.resCur - listH/2
+	if start < 0 {
+		start = 0
+	}
+	if start > len(fs)-listH {
+		start = max(0, len(fs)-listH)
+	}
+	end := min(len(fs), start+listH)
+	for i := start; i < end; i++ {
+		f := fs[i]
+		cursor := "  "
+		if i == m.resCur {
+			cursor = cursorStyle.Render("▸ ")
+		}
+		badge := lipgloss.NewStyle().Foreground(sevColor(f.Severity)).Bold(true).Render(strings.ToUpper(f.Severity))
+		loc := dimStyle.Render(render.CheckLocator(f))
+		row := fmt.Sprintf("%s%-8s %s  %s", cursor, badge, f.Title, loc)
+		b.WriteString(truncate(row, w) + "\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(m.renderCheckDetail(fs[m.resCur], w, detailH))
+
+	b.WriteString(m.statusLine())
+	b.WriteString("\n" + helpStyle.Render("↑/↓ move · y copy fix prompt · c copy finding · Y copy report · f filter · q quit"))
+	return b.String()
+}
+
+func (m *Model) renderCheckDetail(f checks.Finding, w, h int) string {
+	inner := w - 4
+	if inner < 20 {
+		inner = 20
+	}
+	wrap := lipgloss.NewStyle().Width(inner)
+	var b strings.Builder
+	head := lipgloss.NewStyle().Foreground(sevColor(f.Severity)).Bold(true).Render(render.CheckSeverityTag(f))
+	b.WriteString(head + "  " + dimStyle.Render(render.CheckLocator(f)) + "\n")
+	if s := strings.TrimSpace(f.Problem); s != "" {
+		b.WriteString(wrap.Render(s) + "\n")
+	}
+	if s := strings.TrimSpace(f.Impact); s != "" {
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Render("impact: ") + wrap.Render(s) + "\n")
+	}
+	if s := strings.TrimSpace(f.Solution); s != "" {
+		b.WriteString(selStyle.Render("fix: ") + wrap.Render(s) + "\n")
+	}
+	if s := strings.TrimSpace(f.CodeSnippet); s != "" {
+		b.WriteString(dimStyle.Render(truncate(s, inner)) + "\n")
+	}
+	content := truncateToLines(b.String(), h-2, "(y copies the fix prompt for Claude Code/Cursor)")
+	return boxStyle.Width(w - 2).Render(content)
+}
+
+func (m *Model) checkResultSummary() string {
+	cr := m.checkRes
+	parts := []string{fmt.Sprintf("%s: %s (%s)", cr.Repo, cr.Category, cr.Scope), fmt.Sprintf("%d findings", len(m.flatCheck))}
+	switch {
+	case cr.Err != "":
+		parts = append(parts, "failed")
+	case cr.Report != nil && cr.Report.Health != "":
+		parts = append(parts, "health: "+checks.HealthLabel(cr.Report.Health))
+	}
+	if m.sevFilter != "" {
+		parts = append(parts, "filter="+m.sevFilter)
+	}
+	if m.costUSD > 0 {
+		parts = append(parts, fmt.Sprintf("$%.3f", m.costUSD))
+	}
+	return strings.Join(parts, "  ·  ")
+}
+
+// checkEmptyStateBody explains a finding-less check: a failure (with auth
+// hints), or a clean bill of health with the auditor's actual assessment.
+func (m *Model) checkEmptyStateBody() string {
+	cr := m.checkRes
+	w, _ := m.dims()
+	wrap := lipgloss.NewStyle().Width(min(w-2, 100))
+	var b strings.Builder
+	switch {
+	case cr.Err != "":
+		b.WriteString(errStyle.Render("✗ "+cr.Repo+" — check failed") + "\n")
+		b.WriteString(dimStyle.Render("  "+firstLineOf(cr.Err)) + "\n")
+		low := strings.ToLower(cr.Err)
+		if strings.Contains(low, "authenticat") || strings.Contains(low, "401") {
+			b.WriteString("\n" + dimStyle.Render("Auth failed. Try `claude -p hi` in THIS terminal:") + "\n")
+			b.WriteString(dimStyle.Render("  · if that also fails, run `claude` and sign in.") + "\n")
+			b.WriteString(dimStyle.Render("  · if it works there but not here, you launched silly-review from inside a Claude Code session — open a plain terminal.") + "\n")
+		}
+	case cr.Report != nil:
+		head := okStyle.Render("✓ " + cr.Repo)
+		if h := cr.Report.Health; h != "" {
+			head += "  " + lipgloss.NewStyle().Foreground(healthColor(h)).Bold(true).Render("health: "+checks.HealthLabel(h))
+		}
+		b.WriteString(head + "\n\n")
+		if s := strings.TrimSpace(cr.Report.Summary); s != "" {
+			b.WriteString(wrap.Render(s) + "\n")
+		}
+		b.WriteString("\n" + dimStyle.Render("(No findings through this lens. Y copies the full report; try another category or a narrower scope.)") + "\n")
+	case strings.TrimSpace(cr.RawText) != "":
+		b.WriteString(dimStyle.Render(fmt.Sprintf("• %s — assessment (no structured report):", cr.Repo)) + "\n\n")
+		b.WriteString(wrap.Render(strings.TrimSpace(cr.RawText)) + "\n")
+	default:
+		b.WriteString(okStyle.Render(fmt.Sprintf("✓ %s — no findings", cr.Repo)) + "\n")
+	}
 	return b.String()
 }
 
