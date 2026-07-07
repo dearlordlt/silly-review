@@ -46,6 +46,50 @@ func TestBuildArgsReadOnly(t *testing.T) {
 	}
 }
 
+// TestBuildArgsCustomSchema: a custom schema (health checks) replaces the
+// review schema in the argv; the default stays the review schema.
+func TestBuildArgsCustomSchema(t *testing.T) {
+	custom := `{"type":"object","properties":{"x":{"type":"string"}}}`
+	args := BuildArgs(Options{Model: "opus", Schema: custom})
+	if !contains(args, custom) {
+		t.Fatal("custom schema missing from argv")
+	}
+	if contains(args, SchemaJSON) {
+		t.Fatal("review schema should not appear when a custom schema is set")
+	}
+	def := BuildArgs(Options{Model: "opus"})
+	if !contains(def, SchemaJSON) {
+		t.Fatal("empty Options.Schema must default to the review schema")
+	}
+}
+
+// TestRunCustomSchemaStructured: with a custom schema, the raw structured
+// output is captured but NOT half-parsed into Review.
+func TestRunCustomSchemaStructured(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub uses a shell script")
+	}
+	stub := writeStub(t, `{"type":"result","is_error":false,"result":"ok","structured_output":{"summary":"s","health":"good","findings":[]}}`)
+	res, err := Run(context.Background(), Options{Model: "opus", BinPath: stub, PrimaryWorktree: t.TempDir(), Schema: `{"type":"object"}`}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Structured) == 0 {
+		t.Fatal("raw structured output not captured")
+	}
+	if res.Review != nil {
+		t.Fatalf("custom-schema payload must not be parsed as a Review: %+v", res.Review)
+	}
+	// And with the default schema, Review parsing still works (regression guard).
+	res2, err := Run(context.Background(), Options{Model: "opus", BinPath: writeStub(t, stubStream), PrimaryWorktree: t.TempDir()}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Review == nil || len(res2.Structured) == 0 {
+		t.Fatal("default schema must still parse Review and capture raw output")
+	}
+}
+
 // TestRunParsesStructuredOutput drives the full Run path with a stub claude that
 // emits canned stream-json, including the read-only-denial signal.
 func TestRunParsesStructuredOutput(t *testing.T) {

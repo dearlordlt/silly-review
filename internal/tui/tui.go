@@ -5,6 +5,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/atotto/clipboard"
@@ -12,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"silly-review/internal/checks"
 	"silly-review/internal/config"
 	"silly-review/internal/discover"
 	"silly-review/internal/gitx"
@@ -23,17 +25,29 @@ import (
 type screen int
 
 const (
-	scRepoSelect screen = iota
+	scMode screen = iota
+	scRepoSelect
 	scLoading
 	scBranchSelect
 	scBaseConfig
 	scMatch
 	scContinue
 	scStyle
+	scCategory
+	scScope
 	scModel
 	scProgress
 	scResults
 	scError
+)
+
+// appMode is what the user chose on the first screen: a PR-style branch review
+// or a whole-codebase health check.
+type appMode int
+
+const (
+	modeReview appMode = iota
+	modeCheck
 )
 
 // repoPick is the accumulating choice for one repo.
@@ -121,6 +135,13 @@ type Model struct {
 	continueFromPrior bool
 	continueCur       int
 
+	// mode + health-check selection
+	mode          appMode
+	modeCur       int
+	catCur        int
+	scopeCur      int
+	currentBranch string // checked-out branch of the repo being checked ("" = detached)
+
 	styleCur int
 	modelCur int
 
@@ -132,6 +153,8 @@ type Model struct {
 
 	reviews   []render.RepoReview
 	flat      []review.Finding
+	checkRes  render.CheckResult
+	flatCheck []checks.Finding
 	resCur    int
 	sevFilter string
 	statusMsg string
@@ -146,6 +169,7 @@ type repoLoadedMsg struct {
 	branches      []gitx.Branch
 	defaultBranch string
 	candidates    []string
+	current       string // checked-out branch (check mode)
 	err           error
 }
 
@@ -155,6 +179,10 @@ type thinkMsg struct{ text string }
 type allDoneMsg struct {
 	reviews []render.RepoReview
 	cost    float64
+}
+type checkDoneMsg struct {
+	res  render.CheckResult
+	cost float64
 }
 type reviewErrMsg struct{ err error }
 
@@ -187,23 +215,54 @@ func Run(p Params) error {
 }
 
 func (m *Model) Init() tea.Cmd {
+	m.screen = scMode
+	return nil
+}
+
+// enterMode routes past the mode screen once a mode is chosen.
+func (m *Model) enterMode(mode appMode) (tea.Model, tea.Cmd) {
+	m.mode = mode
 	if m.disc.Mode == discover.Multi {
 		m.screen = scRepoSelect
-		fc := m.cfg.Folder(m.folderKey)
-		last := map[string]bool{}
-		for _, n := range fc.LastRepos {
-			last[n] = true
-		}
-		for i, r := range m.repos {
-			if last[r.Name] {
-				m.repoSel[i] = true
+		if mode == modeReview {
+			fc := m.cfg.Folder(m.folderKey)
+			last := map[string]bool{}
+			for _, n := range fc.LastRepos {
+				last[n] = true
+			}
+			for i, r := range m.repos {
+				if last[r.Name] {
+					m.repoSel[i] = true
+				}
 			}
 		}
-		return nil
+		return m, nil
 	}
 	m.picks = []*repoPick{{repo: m.repos[0]}}
 	m.cur = 0
-	return m.startLoadingRepo()
+	return m, m.startLoadingRepo()
+}
+
+// keyMode handles the first screen: review a branch, or check the codebase.
+func (m *Model) keyMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc":
+		return m, tea.Quit
+	case "up", "k":
+		m.modeCur = 0
+	case "down", "j":
+		m.modeCur = 1
+	case "r":
+		return m.enterMode(modeReview)
+	case "c":
+		return m.enterMode(modeCheck)
+	case "enter":
+		if m.modeCur == 1 {
+			return m.enterMode(modeCheck)
+		}
+		return m.enterMode(modeReview)
+	}
+	return m, nil
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -235,6 +294,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.waitForEvent()
 	case allDoneMsg:
 		return m.onAllDone(msg)
+	case checkDoneMsg:
+		return m.onCheckDone(msg)
 	case reviewErrMsg:
 		m.err = msg.err
 		m.screen = scError
@@ -245,6 +306,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.screen {
+	case scMode:
+		return m.keyMode(msg)
 	case scRepoSelect:
 		return m.keyRepoSelect(msg)
 	case scBranchSelect:
@@ -257,6 +320,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.keyContinue(msg)
 	case scStyle:
 		return m.keyStyle(msg)
+	case scCategory:
+		return m.keyCategory(msg)
+	case scScope:
+		return m.keyScope(msg)
 	case scModel:
 		return m.keyModel(msg)
 	case scProgress:
@@ -266,6 +333,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case scResults:
+		if m.mode == modeCheck {
+			return m.keyCheckResults(msg)
+		}
 		return m.keyResults(msg)
 	case scError:
 		return m, tea.Quit
@@ -276,6 +346,26 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // ---- repo select ----
 
 func (m *Model) keyRepoSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Check mode audits exactly one repo: enter picks the highlighted row.
+	if m.mode == modeCheck {
+		switch msg.String() {
+		case "q", "esc":
+			return m, tea.Quit
+		case "up", "k":
+			if m.repoCur > 0 {
+				m.repoCur--
+			}
+		case "down", "j":
+			if m.repoCur < len(m.repos)-1 {
+				m.repoCur++
+			}
+		case "enter", " ":
+			m.picks = []*repoPick{{repo: m.repos[m.repoCur]}}
+			m.cur = 0
+			return m, m.startLoadingRepo()
+		}
+		return m, nil
+	}
 	switch msg.String() {
 	case "q", "esc":
 		return m, tea.Quit
@@ -333,7 +423,7 @@ func (m *Model) startLoadingRepo() tea.Cmd {
 	m.screen = scLoading
 	r := m.picks[m.cur].repo
 	m.loadingMsg = fmt.Sprintf("Loading branches for %s…", r.Name)
-	return tea.Batch(loadRepoCmd(m.ctx, r, m.fetch, m.cur), m.spin.Tick)
+	return tea.Batch(loadRepoCmd(m.ctx, r, m.fetch, m.cur, m.mode == modeCheck), m.spin.Tick)
 }
 
 // startEagerLoad (multi-repo) fetches every selected repo's branches up front so
@@ -344,14 +434,33 @@ func (m *Model) startEagerLoad() tea.Cmd {
 	m.loadingMsg = fmt.Sprintf("Loaded 0 of %d repos…", len(m.picks))
 	cmds := make([]tea.Cmd, 0, len(m.picks)+1)
 	for i, p := range m.picks {
-		cmds = append(cmds, loadRepoCmd(m.ctx, p.repo, m.fetch, i))
+		cmds = append(cmds, loadRepoCmd(m.ctx, p.repo, m.fetch, i, false))
 	}
 	cmds = append(cmds, m.spin.Tick)
 	return tea.Batch(cmds...)
 }
 
-func loadRepoCmd(ctx context.Context, repo *gitx.Repo, fetch bool, idx int) tea.Cmd {
+func loadRepoCmd(ctx context.Context, repo *gitx.Repo, fetch bool, idx int, forCheck bool) tea.Cmd {
 	return func() tea.Msg {
+		// A health check has no base/diff, so it works even without a remote:
+		// local branches (current first) win over their same-name remote copy.
+		if forCheck {
+			var remoteB []gitx.Branch
+			if repo.Remote != "" {
+				if fetch {
+					_ = gitx.Fetch(ctx, repo.Path, repo.Remote)
+				}
+				remoteB, _ = gitx.RemoteBranches(ctx, repo.Path, repo.Remote) // best-effort
+			}
+			localB, _ := gitx.LocalBranches(ctx, repo.Path)
+			cur := gitx.CurrentBranch(ctx, repo.Path)
+			branches := gitx.CheckBranchLists(localB, remoteB, cur)
+			if len(branches) == 0 {
+				return repoLoadedMsg{idx: idx, err: fmt.Errorf("%s has no branches to check (no commits yet?)", repo.Name)}
+			}
+			return repoLoadedMsg{idx: idx, branches: branches, current: cur}
+		}
+
 		if repo.Remote == "" {
 			return repoLoadedMsg{idx: idx, err: fmt.Errorf("%s has no remote (origin) to review", repo.Name)}
 		}
@@ -374,6 +483,21 @@ func loadRepoCmd(ctx context.Context, repo *gitx.Repo, fetch bool, idx int) tea.
 }
 
 func (m *Model) onRepoLoaded(msg repoLoadedMsg) (tea.Model, tea.Cmd) {
+	// Check mode: always one repo, no base to configure — straight to the target picker.
+	if m.mode == modeCheck {
+		if msg.err != nil {
+			m.err = msg.err
+			m.screen = scError
+			return m, nil
+		}
+		p := m.picks[m.cur]
+		p.branches = msg.branches
+		m.currentBranch = msg.current
+		m.loadPickIntoView(p)
+		m.screen = scBranchSelect
+		return m, nil
+	}
+
 	// Single-repo (lazy) mode: one repo, hard-fail on error — nothing to fall back to.
 	if m.disc.Mode != discover.Multi {
 		if msg.err != nil {
@@ -479,6 +603,9 @@ func (m *Model) keyBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.statusMsg = ""
 	case "c":
+		if m.mode == modeCheck {
+			return m, nil // no base branch in check mode
+		}
 		m.statusMsg = ""
 		m.baseReturn = scBranchSelect
 		m.baseAdvance = false
@@ -486,6 +613,13 @@ func (m *Model) keyBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.screen = scBaseConfig
 	case "enter":
 		sel := m.branches[m.brCur]
+		if m.mode == modeCheck {
+			m.statusMsg = ""
+			p := m.picks[m.cur]
+			p.branch = sel
+			p.decided = true
+			return m.gotoCategory()
+		}
 		// Reviewing the base against itself yields an empty diff — catch it here
 		// rather than spinning up a worktree and a no-op review.
 		if sel.Ref == m.picks[m.cur].base {
@@ -505,6 +639,75 @@ func (m *Model) keyBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.advanceToNextUndecided()
 	}
 	return m, nil
+}
+
+// ---- health-check category & scope ----
+
+func (m *Model) gotoCategory() (tea.Model, tea.Cmd) {
+	m.screen = scCategory
+	m.catCur = indexOfCategory(m.cfg.Folder(m.folderKey).CheckCategory)
+	return m, nil
+}
+
+func (m *Model) keyCategory(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q":
+		return m, tea.Quit
+	case "esc":
+		m.screen = scBranchSelect
+	case "up", "k":
+		if m.catCur > 0 {
+			m.catCur--
+		}
+	case "down", "j":
+		if m.catCur < len(checks.Categories)-1 {
+			m.catCur++
+		}
+	case "enter":
+		cat := checks.Categories[m.catCur]
+		m.scopeCur = 0
+		if fc := m.cfg.Folder(m.folderKey); fc.CheckCategory == cat.Key {
+			m.scopeCur = indexOfScope(cat, fc.CheckScope)
+		}
+		m.screen = scScope
+	}
+	return m, nil
+}
+
+func (m *Model) keyScope(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	scopes := checks.Categories[m.catCur].Scopes
+	switch msg.String() {
+	case "q":
+		return m, tea.Quit
+	case "esc":
+		m.screen = scCategory
+	case "up", "k":
+		if m.scopeCur > 0 {
+			m.scopeCur--
+		}
+	case "down", "j":
+		if m.scopeCur < len(scopes)-1 {
+			m.scopeCur++
+		}
+	case "enter":
+		return m.toCheckContinueOrModel()
+	}
+	return m, nil
+}
+
+// toCheckContinueOrModel offers to continue from a saved prior check for this
+// exact repo+ref+category+scope, else goes straight to the model picker.
+func (m *Model) toCheckContinueOrModel() (tea.Model, tea.Cmd) {
+	p := m.picks[m.cur]
+	cat := checks.Categories[m.catCur]
+	scope := cat.Scopes[m.scopeCur]
+	m.continueFromPrior = false
+	if history.HasCheck(p.repo.Path, p.branch.Ref, cat.Key, scope.Key) {
+		m.continueCur = 0 // default: continue from last
+		m.screen = scContinue
+		return m, nil
+	}
+	return m.gotoModel()
 }
 
 // ---- base config ----
@@ -729,8 +932,13 @@ func (m *Model) gotoStyle() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// keyContinue: choose between continuing from the last review or a fresh one.
+// keyContinue: choose between continuing from the last review/check or a fresh
+// one. The next screen depends on the mode (review → style, check → model).
 func (m *Model) keyContinue(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	next := m.gotoStyle
+	if m.mode == modeCheck {
+		next = m.gotoModel
+	}
 	switch msg.String() {
 	case "q", "esc":
 		return m, tea.Quit
@@ -740,13 +948,13 @@ func (m *Model) keyContinue(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.continueCur = 1
 	case "c":
 		m.continueFromPrior = true
-		return m.gotoStyle()
+		return next()
 	case "f":
 		m.continueFromPrior = false
-		return m.gotoStyle()
+		return next()
 	case "enter":
 		m.continueFromPrior = m.continueCur == 0
-		return m.gotoStyle()
+		return next()
 	}
 	return m, nil
 }
@@ -766,9 +974,14 @@ func (m *Model) keyStyle(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.styleCur++
 		}
 	case "enter":
-		m.screen = scModel
-		m.modelCur = indexOfModel(m.cfg.Folder(m.folderKey).Model)
+		return m.gotoModel()
 	}
+	return m, nil
+}
+
+func (m *Model) gotoModel() (tea.Model, tea.Cmd) {
+	m.screen = scModel
+	m.modelCur = indexOfModel(m.cfg.Folder(m.folderKey).Model)
 	return m, nil
 }
 
@@ -779,7 +992,11 @@ func (m *Model) keyModel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q":
 		return m, tea.Quit
 	case "esc":
-		m.screen = scStyle
+		if m.mode == modeCheck {
+			m.screen = scScope
+		} else {
+			m.screen = scStyle
+		}
 	case "up", "k":
 		if m.modelCur > 0 {
 			m.modelCur--
@@ -790,10 +1007,19 @@ func (m *Model) keyModel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		fc := m.cfg.Folder(m.folderKey)
-		fc.Style = review.Styles[m.styleCur].Key
 		fc.Model = modelChoices[m.modelCur].key
+		if m.mode == modeCheck {
+			cat := checks.Categories[m.catCur]
+			fc.CheckCategory = cat.Key
+			fc.CheckScope = cat.Scopes[m.scopeCur].Key
+		} else {
+			fc.Style = review.Styles[m.styleCur].Key
+		}
 		m.cfg.SetFolder(m.folderKey, fc)
 		_ = m.cfg.Save()
+		if m.mode == modeCheck {
+			return m, m.startCheck()
+		}
 		return m, m.startReview()
 	}
 	return m, nil
@@ -819,6 +1045,22 @@ func (m *Model) startReview() tea.Cmd {
 	}
 	return tea.Batch(
 		launchReview(m.ctx, m.ws, active, style, model, m.binPath, m.continueFromPrior, m.events),
+		m.waitForEvent(),
+		m.spin.Tick,
+	)
+}
+
+func (m *Model) startCheck() tea.Cmd {
+	m.screen = scProgress
+	m.logLines = nil
+	m.curActivity = "starting…"
+	m.reviewStart = time.Now()
+	m.events = make(chan tea.Msg, 256)
+	cat := checks.Categories[m.catCur]
+	scope := cat.Scopes[m.scopeCur]
+	model := modelChoices[m.modelCur].key
+	return tea.Batch(
+		launchCheck(m.ctx, m.ws, m.picks[m.cur], cat, scope, model, m.binPath, m.continueFromPrior, m.events),
 		m.waitForEvent(),
 		m.spin.Tick,
 	)
@@ -864,6 +1106,24 @@ func (m *Model) onAllDone(msg allDoneMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	render.SortFindings(m.flat)
+	m.resCur = 0
+	m.screen = scResults
+	return m, nil
+}
+
+func (m *Model) onCheckDone(msg checkDoneMsg) (tea.Model, tea.Cmd) {
+	m.checkRes = msg.res
+	m.costUSD = msg.cost
+	m.flatCheck = nil
+	if msg.res.Report != nil {
+		for _, f := range msg.res.Report.Findings {
+			if f.Repo == "" {
+				f.Repo = msg.res.Repo
+			}
+			m.flatCheck = append(m.flatCheck, f)
+		}
+	}
+	render.SortCheckFindings(m.flatCheck)
 	m.resCur = 0
 	m.screen = scResults
 	return m, nil
@@ -930,8 +1190,94 @@ func (m *Model) keyResults(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// ---- check results ----
+
+var checkSevFilters = []string{"", "critical", "high", "medium", "low", "info"}
+
+func (m *Model) filteredChecks() []checks.Finding {
+	if m.sevFilter == "" {
+		return m.flatCheck
+	}
+	var out []checks.Finding
+	for _, f := range m.flatCheck {
+		if f.Severity == m.sevFilter {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func (m *Model) keyCheckResults(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	fs := m.filteredChecks()
+	switch msg.String() {
+	case "q", "esc":
+		return m, tea.Quit
+	case "up", "k":
+		if m.resCur > 0 {
+			m.resCur--
+		}
+		m.statusMsg = ""
+	case "down", "j":
+		if m.resCur < len(fs)-1 {
+			m.resCur++
+		}
+		m.statusMsg = ""
+	case "f":
+		cur := 0
+		for i, s := range checkSevFilters {
+			if s == m.sevFilter {
+				cur = i
+				break
+			}
+		}
+		m.sevFilter = checkSevFilters[(cur+1)%len(checkSevFilters)]
+		m.resCur = 0
+	case "y":
+		if len(fs) > 0 {
+			if err := clipboard.WriteAll(strings.TrimSpace(fs[m.resCur].FixPrompt)); err != nil {
+				m.statusMsg = "clipboard unavailable (install wl-clipboard or xclip)"
+			} else {
+				m.statusMsg = "✓ fix prompt copied — paste it into Claude Code / Cursor"
+			}
+		}
+	case "c":
+		if len(fs) > 0 {
+			if err := clipboard.WriteAll(render.CheckFindingBlock(fs[m.resCur])); err != nil {
+				m.statusMsg = "clipboard unavailable (install wl-clipboard or xclip)"
+			} else {
+				m.statusMsg = "✓ finding copied (problem + impact + fix + prompt)"
+			}
+		}
+	case "Y":
+		if err := clipboard.WriteAll(render.CheckReportMarkdown(m.checkRes)); err != nil {
+			m.statusMsg = "clipboard unavailable (install wl-clipboard or xclip)"
+		} else {
+			m.statusMsg = "✓ full check report copied to clipboard"
+		}
+	}
+	return m, nil
+}
+
 func indexOfStyle(key string) int {
 	for i, s := range review.Styles {
+		if s.Key == key {
+			return i
+		}
+	}
+	return 0
+}
+
+func indexOfCategory(key string) int {
+	for i, c := range checks.Categories {
+		if c.Key == key {
+			return i
+		}
+	}
+	return 0
+}
+
+func indexOfScope(c checks.Category, key string) int {
+	for i, s := range c.Scopes {
 		if s.Key == key {
 			return i
 		}

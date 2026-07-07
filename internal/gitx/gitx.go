@@ -204,6 +204,45 @@ func MergeBranchLists(local, remote []Branch) []Branch {
 	return out
 }
 
+// CurrentBranch returns the short name of the branch checked out in repoPath,
+// or "" for a detached HEAD.
+func CurrentBranch(ctx context.Context, repoPath string) string {
+	out, err := run(ctx, repoPath, "symbolic-ref", "--short", "-q", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return out
+}
+
+// CheckBranchLists orders branches for a health check, which audits code as it
+// sits on the machine: local branches win over their same-name remote (the
+// local copy is what the user means, unpushed commits included), everything is
+// newest-commit first, and the currently checked-out branch is pinned to the
+// top as the default target.
+func CheckBranchLists(local, remote []Branch, current string) []Branch {
+	lset := make(map[string]bool, len(local))
+	for _, b := range local {
+		lset[b.Name] = true
+	}
+	out := make([]Branch, 0, len(local)+len(remote))
+	out = append(out, local...)
+	for _, b := range remote {
+		if !lset[b.Name] {
+			out = append(out, b)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Date.After(out[j].Date) })
+	for i, b := range out {
+		if b.Local && b.Name == current {
+			cur := out[i]
+			copy(out[1:i+1], out[:i])
+			out[0] = cur
+			break
+		}
+	}
+	return out
+}
+
 // DefaultBranch returns the remote's default branch ref (e.g. "origin/main").
 // Falls back to probing common names if the symbolic ref isn't set.
 func DefaultBranch(ctx context.Context, repoPath, remote string) (string, error) {

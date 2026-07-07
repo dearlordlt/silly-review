@@ -18,10 +18,19 @@ type Options struct {
 	Model           string
 	System          string // --append-system-prompt
 	Prompt          string // -p
+	Schema          string // --json-schema payload; empty means the review schema (SchemaJSON)
 	PrimaryWorktree string // cwd for the subprocess
 	OtherWorktrees  []string
 	BinPath         string // claude binary; defaults to "claude"
 	ResumeSessionID string // when set, resume this session instead of starting fresh
+}
+
+// schema returns the effective --json-schema payload.
+func (o Options) schema() string {
+	if o.Schema == "" {
+		return SchemaJSON
+	}
+	return o.Schema
 }
 
 // allowedTools / disallowedTools enforce the read-only sandbox. Kept as package
@@ -90,7 +99,7 @@ func BuildArgs(opts Options) []string {
 		"-p", opts.Prompt,
 		"--model", opts.Model,
 		"--output-format", "stream-json", "--verbose", "--include-partial-messages",
-		"--json-schema", SchemaJSON,
+		"--json-schema", opts.schema(),
 		"--permission-mode", "dontAsk",
 		"--append-system-prompt", opts.System,
 	}
@@ -111,7 +120,7 @@ func BuildArgs(opts Options) []string {
 
 // ResumePrompt nudges a resumed session to emit the review from existing
 // context rather than starting the read pass over.
-const ResumePrompt = "The previous attempt was interrupted by an API error before you produced the review. Using everything you have already read, output the review now per the JSON schema — do not start the analysis over."
+const ResumePrompt = "The previous attempt was interrupted by an API error before you produced the structured result. Using everything you have already read, output it now per the JSON schema — do not start the analysis over."
 
 // resumeBackoffs is the wait before each resume attempt (var so tests can zero it).
 var resumeBackoffs = []time.Duration{6 * time.Second, 18 * time.Second}
@@ -186,7 +195,8 @@ type Event struct {
 
 // Result is the outcome of a review invocation.
 type Result struct {
-	Review            *Review
+	Review            *Review         // parsed structured output — only when the review schema is in use
+	Structured        json.RawMessage // raw structured_output, whatever the schema (callers with a custom Options.Schema parse this)
 	RawText           string
 	IsError           bool
 	ErrMsg            string
@@ -311,12 +321,17 @@ func Run(ctx context.Context, opts Options, onEvent func(Event)) (*Result, error
 				res.PermissionDenials = append(res.PermissionDenials, d.ToolName)
 			}
 			if len(sl.StructuredOutput) > 0 {
-				var rv Review
-				if json.Unmarshal(sl.StructuredOutput, &rv) == nil {
-					res.Review = &rv
+				res.Structured = append(json.RawMessage(nil), sl.StructuredOutput...)
+				// Only parse into Review when the review schema produced it — a
+				// custom schema's payload would half-fill Review with zero values.
+				if opts.schema() == SchemaJSON {
+					var rv Review
+					if json.Unmarshal(sl.StructuredOutput, &rv) == nil {
+						res.Review = &rv
+					}
 				}
 			}
-			onEvent(Event{Kind: EvtResult, Text: "review complete"})
+			onEvent(Event{Kind: EvtResult, Text: "done"})
 		}
 	}
 

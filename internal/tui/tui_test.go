@@ -54,7 +54,7 @@ func TestViewsDoNotPanic(t *testing.T) {
 	}}}
 	m.onAllDone(allDoneMsg{reviews: m.reviews})
 
-	for _, sc := range []screen{scRepoSelect, scLoading, scBranchSelect, scBaseConfig, scStyle, scModel, scProgress, scResults} {
+	for _, sc := range []screen{scMode, scRepoSelect, scLoading, scBranchSelect, scBaseConfig, scStyle, scCategory, scScope, scModel, scProgress, scResults} {
 		m.screen = sc
 		out := m.View()
 		if strings.TrimSpace(out) == "" {

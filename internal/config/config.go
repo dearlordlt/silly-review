@@ -25,6 +25,9 @@ type FolderConfig struct {
 	Style     string   `json:"style,omitempty"`
 	Model     string   `json:"model,omitempty"`
 	LastRepos []string `json:"lastRepos,omitempty"`
+	// Last health-check lens used from this folder (category + scope keys).
+	CheckCategory string `json:"checkCategory,omitempty"`
+	CheckScope    string `json:"checkScope,omitempty"`
 }
 
 // Defaults are the global fallbacks used when a folder has no remembered choice.

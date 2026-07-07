@@ -27,17 +27,19 @@ are byte-identical before/after (see `internal/gitx/gitx_test.go`).
 ## Layout
 
 ```
-main.go                  cobra entry, flags, headless mode, signal-based cleanup
-internal/config          per-repo base + per-folder style/model (XDG json)
+main.go                  cobra entry, flags, headless review + `check`, signal-based cleanup
+internal/config          per-repo base + per-folder style/model/check-lens (XDG json)
 internal/gitx            read-only git plumbing + disposable worktree Workspace
 internal/discover        single-repo vs multi-repo-root detection
-internal/review          claude argv, stream-json parsing, prompt/persona, schema, preflight
-internal/render          findings → clipboard block / markdown report
-internal/tui             Bubble Tea state machine + per-screen views
+internal/review          claude argv, stream-json parsing, review prompt/persona/schema, preflight
+internal/checks          health-check lenses (categories/scopes), prompts, schema with fix_prompt
+internal/history         last review per repo+branch / last check per repo+ref+lens (continue-from)
+internal/render          findings → clipboard block / markdown report (reviews + check reports)
+internal/tui             Bubble Tea state machine + per-screen views (review + check flows)
 ```
 
-Keep `gitx`, `review`, `config`, `render` free of TUI imports so they stay
-unit-testable and reusable by the `--no-tui` path.
+Keep `gitx`, `review`, `checks`, `history`, `config`, `render` free of TUI
+imports so they stay unit-testable and reusable by the headless paths.
 
 ## Style & deps
 
@@ -58,7 +60,10 @@ unit-testable and reusable by the `--no-tui` path.
 ## claude invocation notes
 
 - Reviews use `--output-format stream-json --json-schema` — structured findings
-  land in the final `result` event's `structured_output`.
+  land in the final `result` event's `structured_output`. Health checks reuse
+  the same runner with `Options.Schema` set to `checks.SchemaJSON`; the raw
+  payload arrives in `Result.Structured` (`Result.Review` is only parsed for
+  the review schema).
 - Diff range is merge-base-aware: three-dot `base...head` normally, two-dot
   `base..head` for unrelated histories (orphan/re-rooted branches). The stat path
   and the prompt must agree on this.
