@@ -156,7 +156,7 @@ func CheckReportMarkdown(cr CheckResult) string {
 // narrative when it's materially richer than the structured summary.
 func checkProseNotes(cr CheckResult) string {
 	notes := strings.TrimSpace(cr.RawText)
-	if notes == "" || cr.Report == nil {
+	if notes == "" || cr.Report == nil || looksLikeJSON(notes) {
 		return ""
 	}
 	sum := strings.TrimSpace(cr.Report.Summary)

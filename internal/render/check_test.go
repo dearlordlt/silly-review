@@ -61,6 +61,25 @@ func TestFixPromptFencing(t *testing.T) {
 	}
 }
 
+// TestProseNotesSkipsRawJSON: with --json-schema the model's final text is
+// often the JSON blob itself — it must never be echoed as auditor's notes.
+func TestProseNotesSkipsRawJSON(t *testing.T) {
+	rawJSON := `{"findings":[{"file":"a.go","title":"x","problem":"a very long problem description that easily exceeds the prose threshold over the summary field by far more than one hundred and twenty characters in total length"}]}`
+	cr := CheckResult{
+		Repo: "r", Ref: "main", Category: "Security", Scope: "General",
+		Report:  &checks.Report{Summary: "short", Health: "good"},
+		RawText: rawJSON,
+	}
+	if out := CheckReportMarkdown(cr); strings.Contains(out, "Auditor's notes") {
+		t.Fatalf("raw JSON must not be rendered as auditor's notes:\n%s", out)
+	}
+	// Real prose of the same length still shows.
+	cr.RawText = strings.ReplaceAll(rawJSON, "{", "(")
+	if out := CheckReportMarkdown(cr); !strings.Contains(out, "Auditor's notes") {
+		t.Fatal("genuine narrative notes should still be rendered")
+	}
+}
+
 func TestSortCheckFindings(t *testing.T) {
 	fs := []checks.Finding{
 		{File: "b.go", StartLine: 2, Severity: "low"},
