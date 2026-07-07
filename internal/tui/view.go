@@ -161,7 +161,7 @@ func (m *Model) viewRepoSelect() string {
 			}
 			b.WriteString(fmt.Sprintf("%s%s\n", cursor, name))
 		}
-		b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter choose · q quit"))
+		b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter choose · esc back · q quit"))
 		return b.String()
 	}
 	var b strings.Builder
@@ -181,7 +181,7 @@ func (m *Model) viewRepoSelect() string {
 	if m.statusMsg != "" {
 		b.WriteString("\n" + dimStyle.Render(m.statusMsg))
 	}
-	b.WriteString("\n" + helpStyle.Render("↑/↓ move · space check/uncheck · a check all · enter continue · q quit"))
+	b.WriteString("\n" + helpStyle.Render("↑/↓ move · space check/uncheck · a check all · enter continue · esc back · q quit"))
 	return b.String()
 }
 
@@ -197,7 +197,7 @@ func (m *Model) viewBranchSelect() string {
 	if m.mode == modeCheck {
 		title = fmt.Sprintf("pick the branch to check in %s", p.repo.Name)
 		sub = "The whole codebase is audited as it stands on this branch — no diff, no base. Your checked-out branch is first."
-		help = "↑/↓ move · enter check this branch · q quit"
+		help = "↑/↓ move · enter check this branch · esc back · q quit"
 	} else {
 		title = fmt.Sprintf("pick the branch to review in %s", p.repo.Name)
 		switch {
@@ -224,7 +224,7 @@ func (m *Model) viewBranchSelect() string {
 		switch {
 		case m.mode == modeCheck && br.Local && br.Name == m.currentBranch:
 			tag = selStyle.Render(" (current)")
-		case br.Local:
+		case br.Local && br.Unpushed:
 			tag = selStyle.Render(" (local, unpushed)")
 		}
 		meta := dimStyle.Render(fmt.Sprintf("%s · %s", br.Author, br.DateRel))
@@ -403,7 +403,7 @@ func (m *Model) viewContinue() string {
 			}
 			b.WriteString(cursor + label + "\n")
 		}
-		b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter choose · c continue · f fresh · q quit"))
+		b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter choose · c continue · f fresh · esc back · q quit"))
 		return b.String()
 	}
 
@@ -456,8 +456,12 @@ func (m *Model) viewStyle() string {
 }
 
 func (m *Model) viewModel() string {
+	noun := "review"
+	if m.mode == modeCheck {
+		noun = "check"
+	}
 	var b strings.Builder
-	b.WriteString(header("choose the model", "Which Claude model runs the review. Bigger reads more carefully but takes longer. Runs on your Claude subscription — no API key, no per-token charge."))
+	b.WriteString(header("choose the model", fmt.Sprintf("Which Claude model runs the %s. Bigger reads more carefully but takes longer. Runs on your Claude subscription — no API key, no per-token charge.", noun)))
 	for i, mo := range modelChoices {
 		cursor := "  "
 		name := mo.key
@@ -467,7 +471,7 @@ func (m *Model) viewModel() string {
 		}
 		b.WriteString(fmt.Sprintf("%s%-8s %s\n", cursor, name, dimStyle.Render(mo.desc)))
 	}
-	b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter start review · esc back · q quit"))
+	b.WriteString("\n" + helpStyle.Render(fmt.Sprintf("↑/↓ move · enter start %s · esc back · q quit", noun)))
 	return b.String()
 }
 

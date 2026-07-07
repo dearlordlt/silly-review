@@ -1,6 +1,7 @@
 // Command silly-review is a TUI that produces senior-engineer code reviews of
-// remote branches by driving the `claude` CLI, without ever touching the user's
-// working tree.
+// git branches and whole-codebase health checks (security, tech debt,
+// performance, …) by driving the `claude` CLI, without ever touching the
+// user's working tree.
 package main
 
 import (
@@ -44,7 +45,7 @@ var (
 func main() {
 	root := &cobra.Command{
 		Use:           "silly-review",
-		Short:         "Senior-engineer code reviews of remote branches, powered by Claude — read-only, never touches your working tree.",
+		Short:         "Senior-engineer code reviews of git branches and codebase health checks, powered by Claude — read-only, never touches your working tree.",
 		Version:       buildVersion(),
 		Args:          cobra.NoArgs,
 		RunE:          runReview,
@@ -239,15 +240,6 @@ func runHeadless(ctx context.Context, cfg *config.Config, disc *discover.Result,
 		_ = history.Save(repo.Path, head, history.Entry{Repo: repo.Name, Branch: head, Base: base, When: time.Now(), Review: *res.Review})
 	}
 
-	if flagJSON {
-		if res.Review == nil {
-			return fmt.Errorf("no structured review: %s", firstNonEmpty(res.ErrMsg, res.RawText, res.Stderr, "claude returned no structured output"))
-		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(res.Review)
-	}
-
 	rr := render.RepoReview{Repo: repo.Name, Branch: head, Base: base}
 	if res.IsError {
 		rr.Err = res.ErrMsg
@@ -256,16 +248,29 @@ func runHeadless(ctx context.Context, cfg *config.Config, disc *discover.Result,
 		rr.RawText = res.RawText
 	}
 	report := render.FullReport([]render.RepoReview{rr})
-	fmt.Print(report)
+
+	if flagJSON {
+		if res.Review == nil {
+			return fmt.Errorf("no structured review: %s", firstNonEmpty(res.ErrMsg, res.RawText, res.Stderr, "claude returned no structured output"))
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(res.Review); err != nil {
+			return err
+		}
+	} else {
+		fmt.Print(report)
+	}
+	// --out always gets the markdown report, --json included.
 	if flagOut != "" {
 		if err := os.WriteFile(flagOut, []byte(report), 0o644); err != nil {
 			return fmt.Errorf("writing report: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "wrote %s\n", flagOut)
 	}
-	// Reflect a failed review in the exit code so CI/scripting can tell a
-	// transient/auth/overload failure apart from a clean pass (the report still
-	// printed above for the human).
+	// Reflect a failed review in the exit code — in JSON mode too, since an
+	// is_error result can still carry partial structured output — so CI can tell
+	// a transient/auth/overload failure apart from a clean pass.
 	if res.IsError {
 		return fmt.Errorf("review failed: %s", res.ErrMsg)
 	}
@@ -475,15 +480,6 @@ func runHeadlessCheck(ctx context.Context, cat checks.Category, scope checks.Sco
 		})
 	}
 
-	if jsonOut {
-		if report == nil {
-			return fmt.Errorf("no structured report: %s", firstNonEmpty(res.ErrMsg, res.RawText, res.Stderr, "claude returned no structured output"))
-		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(report)
-	}
-
 	if res.IsError {
 		cr.Err = res.ErrMsg
 	} else {
@@ -491,13 +487,29 @@ func runHeadlessCheck(ctx context.Context, cat checks.Category, scope checks.Sco
 		cr.RawText = res.RawText
 	}
 	out := render.CheckReportMarkdown(cr)
-	fmt.Print(out)
+
+	if jsonOut {
+		if report == nil {
+			return fmt.Errorf("no structured report: %s", firstNonEmpty(res.ErrMsg, res.RawText, res.Stderr, "claude returned no structured output"))
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(report); err != nil {
+			return err
+		}
+	} else {
+		fmt.Print(out)
+	}
+	// --out always gets the markdown report, --json included (JSON to stdout +
+	// file, as the README promises).
 	if outFile != "" {
 		if err := os.WriteFile(outFile, []byte(out), 0o644); err != nil {
 			return fmt.Errorf("writing report: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "wrote %s\n", outFile)
 	}
+	// A failed run must exit non-zero even in JSON mode — an is_error result can
+	// still carry partial structured output, and CI must not mistake it for a pass.
 	if res.IsError {
 		return fmt.Errorf("check failed: %s", res.ErrMsg)
 	}

@@ -447,7 +447,7 @@ func describeTool(name string, input json.RawMessage) string {
 	case "Glob":
 		return "listing files"
 	case "StructuredOutput":
-		return "writing the review…"
+		return "writing the report…"
 	case "TodoWrite":
 		return "planning…"
 	default:

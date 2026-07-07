@@ -70,8 +70,8 @@ type repoPick struct {
 type modelOpt struct{ key, desc string }
 
 var modelChoices = []modelOpt{
-	{"opus", "Most capable — best for thorough, nuanced reviews"},
-	{"sonnet", "Fast and strong — a great default for most reviews"},
+	{"opus", "Most capable — best for thorough, nuanced work"},
+	{"sonnet", "Fast and strong — a great default"},
 	{"haiku", "Fastest, lightest — quick passes"},
 	{"fable", "Latest Fable model"},
 }
@@ -349,8 +349,10 @@ func (m *Model) keyRepoSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Check mode audits exactly one repo: enter picks the highlighted row.
 	if m.mode == modeCheck {
 		switch msg.String() {
-		case "q", "esc":
+		case "q":
 			return m, tea.Quit
+		case "esc":
+			m.screen = scMode
 		case "up", "k":
 			if m.repoCur > 0 {
 				m.repoCur--
@@ -367,8 +369,10 @@ func (m *Model) keyRepoSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch msg.String() {
-	case "q", "esc":
+	case "q":
 		return m, tea.Quit
+	case "esc":
+		m.screen = scMode
 	case "up", "k":
 		if m.repoCur > 0 {
 			m.repoCur--
@@ -455,6 +459,12 @@ func loadRepoCmd(ctx context.Context, repo *gitx.Repo, fetch bool, idx int, forC
 			localB, _ := gitx.LocalBranches(ctx, repo.Path)
 			cur := gitx.CurrentBranch(ctx, repo.Path)
 			branches := gitx.CheckBranchLists(localB, remoteB, cur)
+			// Detached HEAD has no branch name but is still what's checked out —
+			// offer it as the default target instead of dropping it silently.
+			if cur == "" && gitx.RefExists(ctx, repo.Path, "HEAD") {
+				cur = "HEAD"
+				branches = append([]gitx.Branch{{Name: "HEAD", Ref: "HEAD", Local: true, Subject: "detached — audit exactly what's checked out"}}, branches...)
+			}
 			if len(branches) == 0 {
 				return repoLoadedMsg{idx: idx, err: fmt.Errorf("%s has no branches to check (no commits yet?)", repo.Name)}
 			}
@@ -590,7 +600,19 @@ func baseCandidates(def string, branches []gitx.Branch) []string {
 
 func (m *Model) keyBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "q", "esc":
+	case "q":
+		return m, tea.Quit
+	case "esc":
+		// Check mode has a clean back path; the review flow keeps esc = quit
+		// (backing out mid multi-repo matching is ambiguous).
+		if m.mode == modeCheck {
+			if m.disc.Mode == discover.Multi {
+				m.screen = scRepoSelect
+			} else {
+				m.screen = scMode
+			}
+			return m, nil
+		}
 		return m, tea.Quit
 	case "up", "k":
 		if m.brCur > 0 {
@@ -940,7 +962,13 @@ func (m *Model) keyContinue(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		next = m.gotoModel
 	}
 	switch msg.String() {
-	case "q", "esc":
+	case "q":
+		return m, tea.Quit
+	case "esc":
+		if m.mode == modeCheck {
+			m.screen = scScope
+			return m, nil
+		}
 		return m, tea.Quit
 	case "up", "k":
 		m.continueCur = 0

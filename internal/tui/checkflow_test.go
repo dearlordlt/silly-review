@@ -35,11 +35,18 @@ func TestCheckFlow(t *testing.T) {
 		t.Fatalf("check repo select should be single-choice:\n%s", s)
 	}
 
+	// esc on the repo picker returns to the mode screen.
+	m.keyRepoSelect(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.screen != scMode {
+		t.Fatalf("esc from repo select should return to the mode screen, got %d", m.screen)
+	}
+	m.keyMode(runeKey("c"))
+
 	// Simulate the load completing (skip loadRepoCmd: it shells out to git).
 	m.picks = []*repoPick{{repo: m.repos[0]}}
 	m.cur = 0
 	branches := []gitx.Branch{
-		{Name: "krea2", Ref: "krea2", Local: true, Author: "Me", DateRel: "1h ago", Subject: "wip"},
+		{Name: "krea2", Ref: "krea2", Local: true, Unpushed: true, Author: "Me", DateRel: "1h ago", Subject: "wip"},
 		{Name: "main", Ref: "main", Local: true, Author: "Me", DateRel: "2d ago", Subject: "release"},
 	}
 	m.onRepoLoaded(repoLoadedMsg{idx: 0, branches: branches, current: "krea2"})
@@ -49,6 +56,17 @@ func TestCheckFlow(t *testing.T) {
 	if s := m.viewBranchSelect(); !strings.Contains(s, "(current)") {
 		t.Fatalf("current branch should be tagged:\n%s", s)
 	}
+	// A pushed local branch (main) must NOT be tagged unpushed in check mode.
+	if s := m.viewBranchSelect(); strings.Contains(s, "unpushed") {
+		t.Fatalf("pushed local branch mislabeled as unpushed:\n%s", s)
+	}
+
+	// esc on the branch picker goes back to the repo picker (multi-repo root).
+	m.keyBranchSelect(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.screen != scRepoSelect {
+		t.Fatalf("esc from branch select should return to repo select, got %d", m.screen)
+	}
+	m.screen = scBranchSelect
 
 	// Enter on the current branch → category picker (no prior → no continue).
 	m.keyBranchSelect(enter())
@@ -95,6 +113,12 @@ func TestCheckFlow(t *testing.T) {
 	if s := m.viewContinue(); !strings.Contains(s, "previous check") {
 		t.Fatalf("continue screen should speak about checks:\n%s", s)
 	}
+	// esc goes back to the scope picker instead of quitting the app.
+	m.keyContinue(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.screen != scScope {
+		t.Fatalf("esc from continue should return to scope, got %d", m.screen)
+	}
+	m.keyScope(enter())
 	m.keyContinue(runeKey("c"))
 	if !m.continueFromPrior || m.screen != scModel {
 		t.Fatalf("continue choice failed: continue=%v screen=%d", m.continueFromPrior, m.screen)
